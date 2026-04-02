@@ -5920,6 +5920,7 @@ async function resetVulnerabilities() {
             
             // Update vulnerability count display
             updateElement('vuln-count', '0');
+            updateElement('config-vuln-count', '0');
             updateElement('vulnerability-count', '0');
             
             // Refresh current tab if we're on network or discovered tabs
@@ -5973,6 +5974,7 @@ async function updateVulnerabilityCount() {
         const stats = await fetchAPI('/api/stats');
         const count = stats.vulnerability_count || 0;
         updateElement('vuln-count', count.toString());
+        updateElement('config-vuln-count', count.toString());
     } catch (error) {
         console.error('Error updating vulnerability count:', error);
         updateElement('vuln-count', '?');
