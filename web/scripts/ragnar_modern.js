@@ -539,6 +539,20 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+// Escapes a value for safe embedding inside a single-quoted JS string
+// that lives inside an HTML attribute (e.g. onclick="fn('VALUE')").
+// escapeHtml alone does not escape single quotes.
+function escapeAttr(str) {
+    if (str == null) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/'/g, '&#39;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/`/g, '&#96;');
+}
+
 function isValidIPv4(ip) {
     if (!ip) {
         return false;
@@ -1591,7 +1605,7 @@ function displayNetworkFiles(data) {
 
             html += `
                 <div class="flex items-center justify-between bg-gray-800 rounded-lg px-4 py-3 ${clickable ? 'hover:bg-gray-700 cursor-pointer' : ''} transition-colors"
-                     ${clickable ? `onclick="openLootFile('${vpath}')"` : ''}>
+                     ${clickable ? `onclick="openLootFile('${escapeAttr(vpath)}')"` : ''}>
                     <div class="flex items-center gap-3 min-w-0">
                         <svg class="w-4 h-4 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
@@ -2943,7 +2957,7 @@ function renderHostPanel(data) {
 
     document.getElementById('hdp-ip').textContent = data.ip || '—';
     document.getElementById('hdp-hostname').textContent = data.hostname || 'No hostname';
-    document.getElementById('hdp-status').innerHTML = `<span class="${statusColors[data.status] || 'text-gray-400'}">${data.status || 'unknown'}</span>`;
+    document.getElementById('hdp-status').innerHTML = `<span class="${statusColors[data.status] || 'text-gray-400'}">${escapeHtml(data.status || 'unknown')}</span>`;
     document.getElementById('hdp-mac').textContent = data.mac || '—';
     document.getElementById('hdp-lastseen').textContent = data.last_seen || '—';
     document.getElementById('hdp-portcount').textContent = `${(data.ports || []).length} port${(data.ports||[]).length !== 1 ? 's' : ''}`;
@@ -6171,9 +6185,9 @@ async function refreshEthernetStatus() {
             const iface = data.active_interface;
             indicator.className = 'text-sm px-2 py-1 rounded bg-green-900/50 text-green-400';
             indicator.textContent = 'Connected';
-            info.innerHTML = `<span class="text-green-400 font-medium">${iface.name}</span> &mdash; ${iface.ip_address || 'No IP'}`;
+            info.innerHTML = `<span class="text-green-400 font-medium">${escapeHtml(iface.name)}</span> &mdash; ${escapeHtml(iface.ip_address || 'No IP')}`;
             if (iface.network_cidr) {
-                info.innerHTML += `<br><span class="text-gray-500 text-xs">Network: ${iface.network_cidr}</span>`;
+                info.innerHTML += `<br><span class="text-gray-500 text-xs">Network: ${escapeHtml(iface.network_cidr)}</span>`;
             }
         } else if (data.available) {
             indicator.className = 'text-sm px-2 py-1 rounded bg-yellow-900/50 text-yellow-400';
@@ -10784,7 +10798,7 @@ function displayFiles(files, path, highlightFile = null) {
     if (path !== '/') {
         const parentPath = path.split('/').slice(0, -1).join('/') || '/';
         html += `
-            <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors" onclick="loadFiles('${parentPath}')">
+            <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors" onclick="loadFiles('${escapeAttr(parentPath)}')">
                 <svg class="w-5 h-5 mr-3 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
                 </svg>
@@ -10827,21 +10841,21 @@ function displayFiles(files, path, highlightFile = null) {
         
         html += `
             <div class="flex items-center justify-between p-3 hover:bg-slate-700 rounded-lg transition-colors" data-file-key="${fileKey}">
-                <div class="flex items-center cursor-pointer flex-1" onclick="${file.is_directory ? `loadFiles('${file.path}')` : `previewFile('${file.path}')`}">
+                <div class="flex items-center cursor-pointer flex-1" onclick="${file.is_directory ? `loadFiles('${escapeAttr(file.path)}')` : `previewFile('${escapeAttr(file.path)}')`}">
                     ${icon}
                     <div class="flex-1">
-                        <div class="font-medium">${file.name}</div>
+                        <div class="font-medium">${escapeHtml(file.name)}</div>
                         ${!file.is_directory && size ? `<div class="text-sm text-gray-400">${size} • ${date}</div>` : ''}
                     </div>
                 </div>
                 ${!file.is_directory ? `
                     <div class="flex space-x-2">
-                        <button onclick="downloadFile('${file.path}')" class="p-2 text-blue-400 hover:bg-slate-600 rounded" title="Download">
+                        <button onclick="downloadFile('${escapeAttr(file.path)}')" class="p-2 text-blue-400 hover:bg-slate-600 rounded" title="Download">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-4-4m4 4l4-4m6 4H6"></path>
                             </svg>
                         </button>
-                        <button onclick="deleteFile('${file.path}')" class="p-2 text-red-400 hover:bg-slate-600 rounded" title="Delete">
+                        <button onclick="deleteFile('${escapeAttr(file.path)}')" class="p-2 text-red-400 hover:bg-slate-600 rounded" title="Delete">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
                             </svg>
@@ -10977,13 +10991,13 @@ function previewFile(filePath) {
             } else if (data.type === 'too_large') {
                 content.innerHTML = `<div class="text-center text-gray-400 py-12">
                     <p class="mb-3">File is too large to preview (${formatBytes(data.size)})</p>
-                    <button onclick="downloadFile('${filePath}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm">Download Instead</button>
+                    <button onclick="downloadFile('${escapeAttr(filePath)}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm">Download Instead</button>
                 </div>`;
             } else {
                 content.innerHTML = `<div class="text-center text-gray-400 py-12">
                     <p class="mb-1">Cannot preview this file type (${escapeHtml(data.mime || 'unknown')})</p>
                     <p class="text-sm mb-3">Size: ${formatBytes(data.size)}</p>
-                    <button onclick="downloadFile('${filePath}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm">Download</button>
+                    <button onclick="downloadFile('${escapeAttr(filePath)}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm">Download</button>
                 </div>`;
             }
         })
