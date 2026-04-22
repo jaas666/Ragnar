@@ -7234,9 +7234,29 @@ function displayWifiNetworks(data, options = {}) {
             badge = '<span class="text-xs px-2 py-1 rounded bg-blue-600 text-white ml-2">Saved</span>';
         }
         
+        // Edit button for saved networks (pencil icon)
+        const editBtn = isKnown ? `
+            <button onclick="event.stopPropagation(); openWifiConnectModal('${ssid.replace(/'/g, "\\'")}', ${isKnown}, ${isSecure}, true)"
+                    class="p-1 text-gray-400 hover:text-blue-400 transition-colors" title="Update password">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path>
+                </svg>
+            </button>
+        ` : '';
+
+        // Delete button for saved networks (not the currently connected one)
+        const deleteBtn = (isKnown && !isCurrent) ? `
+            <button onclick="event.stopPropagation(); forgetWifiNetwork('${ssid.replace(/'/g, "\\\\'")}')"
+                    class="p-1 text-gray-400 hover:text-red-400 transition-colors" title="Forget network">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                </svg>
+            </button>
+        ` : '';
+
         return `
             <div class="bg-slate-800 rounded-lg p-3 hover:bg-slate-700 transition-colors cursor-pointer"
-                 onclick="openWifiConnectModal('${ssid.replace(/'/g, "\\'")}', ${isKnown})">
+                 onclick="openWifiConnectModal('${ssid.replace(/'/g, "\\'")}', ${isKnown}, ${isSecure})">
                 <div class="flex items-center justify-between">
                     <div class="flex items-center space-x-3 flex-1">
                         ${signalIcon}
@@ -7251,6 +7271,8 @@ function displayWifiNetworks(data, options = {}) {
                         </div>
                     </div>
                     <div class="flex items-center space-x-2">
+                        ${deleteBtn}
+                        ${editBtn}
                         ${securityIcon}
                         <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
@@ -7262,17 +7284,18 @@ function displayWifiNetworks(data, options = {}) {
     }).join('');
 }
 
-function openWifiConnectModal(ssid, isKnown, isSecure) {
+function openWifiConnectModal(ssid, isKnown, isSecure, editMode) {
     const modal = document.getElementById('wifi-connect-modal');
     const ssidInput = document.getElementById('wifi-connect-ssid');
     const passwordSection = document.getElementById('wifi-password-section');
     const passwordInput = document.getElementById('wifi-connect-password');
     const statusDiv = document.getElementById('wifi-connect-status');
+    const submitBtn = document.getElementById('wifi-connect-submit-btn');
     
     if (!modal || !ssidInput) return;
     
     // Store selected network
-    selectedWifiNetwork = { ssid, isKnown, isSecure };
+    selectedWifiNetwork = { ssid, isKnown, isSecure, editMode: !!editMode };
     
     // Set SSID
     ssidInput.value = ssid;
@@ -7280,15 +7303,26 @@ function openWifiConnectModal(ssid, isKnown, isSecure) {
     // Clear password
     if (passwordInput) {
         passwordInput.value = '';
+        passwordInput.placeholder = editMode ? 'Enter new password' : 'Enter Wi-Fi password';
     }
     
-    // Hide/show password section: hide for known networks and open (unsecured) networks
+    // Show/hide password section:
+    // - Hide for open (unsecured) networks
+    // - Hide for known networks UNLESS in edit mode
+    // - Show for new secured networks and edit mode
     if (passwordSection) {
-        if (isKnown || !isSecure) {
+        if (!isSecure) {
+            passwordSection.style.display = 'none';
+        } else if (isKnown && !editMode) {
             passwordSection.style.display = 'none';
         } else {
             passwordSection.style.display = 'block';
         }
+    }
+    
+    // Update button text for edit mode
+    if (submitBtn) {
+        submitBtn.textContent = editMode ? 'Update & Connect' : 'Connect';
     }
     
     // Hide status
@@ -7308,6 +7342,24 @@ function closeWifiConnectModal() {
         modal.classList.remove('flex');
     }
     selectedWifiNetwork = null;
+}
+
+async function forgetWifiNetwork(ssid) {
+    if (!confirm(`Forget network "${ssid}"? You will need to re-enter the password to connect again.`)) {
+        return;
+    }
+    try {
+        const data = await postAPI('/api/wifi/forget', { ssid });
+        if (data.success) {
+            addConsoleMessage(`Forgot Wi-Fi network: ${ssid}`, 'success');
+            scanWifiNetworks();
+        } else {
+            addConsoleMessage(`Failed to forget network: ${data.message || 'Unknown error'}`, 'error');
+        }
+    } catch (error) {
+        console.error('Error forgetting network:', error);
+        addConsoleMessage(`Error forgetting network: ${error.message}`, 'error');
+    }
 }
 
 function togglePasswordVisibility() {
@@ -7346,11 +7398,13 @@ async function connectToWifiNetwork() {
     const ssid = selectedWifiNetwork.ssid;
     const isKnown = selectedWifiNetwork.isKnown;
     const isSecure = selectedWifiNetwork.isSecure;
-    const password = (isKnown || !isSecure) ? null : (passwordInput ? passwordInput.value : '');
+    const editMode = selectedWifiNetwork.editMode;
+    const needsPassword = isSecure && (!isKnown || editMode);
+    const password = needsPassword ? (passwordInput ? passwordInput.value : '') : null;
     const saveNetwork = saveCheckbox ? saveCheckbox.checked : true;
     
-    // Validate password for new secured networks (not needed for open networks)
-    if (!isKnown && isSecure && !password) {
+    // Validate password for secured networks that need one
+    if (needsPassword && !password) {
         if (statusDiv) {
             statusDiv.classList.remove('hidden');
             statusDiv.innerHTML = '<div class="bg-red-600 rounded p-3 text-sm">Please enter a password</div>';
@@ -7427,7 +7481,7 @@ async function connectToWifiNetwork() {
             addConsoleMessage(`Failed to connect to Wi-Fi: ${ssid}`, 'error');
             
             // If this was a known network, show password field for retry
-            if (isKnown && passwordSection) {
+            if (isKnown && !editMode && isSecure && passwordSection) {
                 passwordSection.style.display = 'block';
                 if (passwordInput) {
                     passwordInput.value = '';
@@ -7435,7 +7489,7 @@ async function connectToWifiNetwork() {
                 }
                 // Update the network state so next attempt uses the password
                 if (selectedWifiNetwork) {
-                    selectedWifiNetwork.isKnown = false;
+                    selectedWifiNetwork.editMode = true;
                 }
             }
         }
@@ -7455,7 +7509,7 @@ async function connectToWifiNetwork() {
         addConsoleMessage(`Error connecting to Wi-Fi: ${error.message}`, 'error');
         
         // Show password field on connection error for known networks
-        if (isKnown && passwordSection) {
+        if (isKnown && !editMode && isSecure && passwordSection) {
             passwordSection.style.display = 'block';
             if (passwordInput) {
                 passwordInput.value = '';
@@ -7463,7 +7517,7 @@ async function connectToWifiNetwork() {
             }
             // Update the network state
             if (selectedWifiNetwork) {
-                selectedWifiNetwork.isKnown = false;
+                selectedWifiNetwork.editMode = true;
             }
         }
         
@@ -7471,7 +7525,7 @@ async function connectToWifiNetwork() {
         // Re-enable submit button
         if (submitBtn) {
             submitBtn.disabled = false;
-            submitBtn.innerHTML = 'Connect';
+            submitBtn.innerHTML = selectedWifiNetwork && selectedWifiNetwork.editMode ? 'Update & Connect' : 'Connect';
         }
     }
 }
@@ -11935,6 +11989,7 @@ window.openWifiConnectModal = openWifiConnectModal;
 window.closeWifiConnectModal = closeWifiConnectModal;
 window.togglePasswordVisibility = togglePasswordVisibility;
 window.connectToWifiNetwork = connectToWifiNetwork;
+window.forgetWifiNetwork = forgetWifiNetwork;
 
 // Bluetooth Management Functions
 window.refreshBluetoothStatus = refreshBluetoothStatus;
