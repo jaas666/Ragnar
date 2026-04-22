@@ -35,6 +35,7 @@ HEADLESS_VARIANT_LABEL=""
 RAGNAR_ENTRYPOINT="Ragnar.py"
 SERVER_INSTALL=false
 TFT_MODE=false
+GIT_WORKS=true
 
 # Platform detection variables
 OS_ID=""
@@ -105,6 +106,60 @@ check_success() {
         handle_error "$1"
         return $?
     fi
+}
+
+# Check if git is functional (Debian Trixie arm64 can ship git compiled with
+# ARMv8.1+ atomics that crash with SIGILL on Cortex-A53 / Pi Zero 2 W).
+check_git() {
+    if git --version >/dev/null 2>&1; then
+        GIT_WORKS=true
+    else
+        GIT_WORKS=false
+        log "WARNING" "git crashes or is missing — will use wget tarball downloads as fallback"
+    fi
+}
+
+# Clone a repository, falling back to a wget tarball download when git is broken.
+# Usage: clone_or_download <repo_url> [target_dir] [branch]
+# repo_url must be a GitHub https URL (https://github.com/owner/repo.git or without .git).
+clone_or_download() {
+    local repo_url=$1
+    local target_dir=${2:-}
+    local branch=${3:-main}
+
+    # Derive target_dir from the repo name if not supplied
+    if [ -z "$target_dir" ]; then
+        target_dir=$(basename "${repo_url%.git}")
+    fi
+
+    # Try git first
+    if [ "$GIT_WORKS" = true ]; then
+        if git clone "$repo_url" "$target_dir" 2>/dev/null; then
+            return 0
+        fi
+        log "WARNING" "git clone failed — falling back to wget tarball download"
+    fi
+
+    # Fallback: download tarball from GitHub
+    local repo_path="${repo_url#https://github.com/}"
+    repo_path="${repo_path%.git}"
+    local tarball_url="https://github.com/${repo_path}/archive/refs/heads/${branch}.tar.gz"
+    local temp_tar
+    temp_tar=$(mktemp /tmp/ragnar-dl-XXXXXX.tar.gz)
+
+    log "INFO" "Downloading ${repo_path} tarball (branch: ${branch})..."
+    if wget -q --timeout=60 -O "$temp_tar" "$tarball_url" 2>/dev/null \
+       || curl -fsSL --connect-timeout 30 -o "$temp_tar" "$tarball_url" 2>/dev/null; then
+        mkdir -p "$target_dir"
+        tar xzf "$temp_tar" -C "$target_dir" --strip-components=1
+        rm -f "$temp_tar"
+        log "SUCCESS" "Downloaded and extracted ${repo_path}"
+        return 0
+    fi
+
+    rm -f "$temp_tar"
+    log "ERROR" "Failed to download ${repo_path} via both git and wget/curl"
+    return 1
 }
 
 # Detect OS, package manager, and hardware architecture
@@ -430,8 +485,8 @@ install_dependencies() {
         log "INFO" "vulners.nse script already present"
     fi
 
-    # Update nmap scripts
-    nmap --script-updatedb
+    # Update nmap scripts (may fail with SIGILL on some ARM builds)
+    nmap --script-updatedb >/dev/null 2>&1 || log "WARNING" "nmap --script-updatedb failed — vulnerability scripts may be stale"
 
     # Configure WiFi interfaces
     log "INFO" "Configuring WiFi interfaces..."
@@ -624,19 +679,24 @@ setup_ragnar() {
 
     # Check for existing ragnar directory with a valid git clone
     cd /home/$ragnar_USER
-    if [ -d "Ragnar/.git" ]; then
+    if [ -d "Ragnar/.git" ] || [ -d "Ragnar/actions" ]; then
         log "INFO" "Using existing ragnar directory"
         echo -e "${GREEN}Using existing ragnar directory${NC}"
     else
         # Remove empty/invalid directory if it exists
         if [ -d "Ragnar" ]; then
-            log "WARNING" "Ragnar directory exists but is not a valid git clone, removing..."
+            log "WARNING" "Ragnar directory exists but is not a valid clone, removing..."
             rm -rf Ragnar
         fi
-        # Proceed with clone
+        # Proceed with clone (falls back to wget tarball if git is broken)
         log "INFO" "Cloning ragnar repository"
-        git clone https://github.com/PierreGode/Ragnar.git
-        check_success "Cloned ragnar repository"
+        if ! clone_or_download https://github.com/PierreGode/Ragnar.git Ragnar main; then
+            log "ERROR" "Cannot obtain Ragnar repository — installation cannot continue"
+            log "ERROR" "If git crashes with 'Illegal instruction', your git binary may be"
+            log "ERROR" "compiled for a newer ARM architecture. Try: sudo apt reinstall git"
+            log "ERROR" "or download manually: wget https://github.com/PierreGode/Ragnar/archive/refs/heads/main.tar.gz"
+            clean_exit 1
+        fi
     fi
 
     cd Ragnar
@@ -690,8 +750,10 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
     log "INFO" "Installing core Python packages..."
     
     # Function to check if a Python package is installed
+    # Runs import in a subshell to suppress the shell's "Illegal instruction"
+    # message that appears when python3/numpy crash with SIGILL on some ARM builds.
     check_python_package() {
-        python3 -c "import $1" 2>/dev/null
+        (python3 -c "import $1" >/dev/null 2>&1) 2>/dev/null
         return $?
     }
     
@@ -1394,6 +1456,11 @@ main() {
     detect_platform
     log_system_summary
 
+    # Early check: ensure git works (Debian Trixie arm64 may ship git compiled
+    # with ARMv8.1+ instructions that crash with SIGILL on Cortex-A53 / Pi Zero 2 W).
+    # Must run before the display-selection menu which clones the e-Paper repo.
+    check_git
+
     # Check if script is run as root
     if [ "$(id -u)" -ne 0 ]; then
         echo "This script must be run as root. Please use 'sudo'."
@@ -1571,16 +1638,48 @@ main() {
         
         cd /home/$ragnar_USER 2>/dev/null || mkdir -p /home/$ragnar_USER
         if [ ! -d "e-Paper" ]; then
-            git clone --depth=1 --filter=blob:none --sparse https://github.com/waveshareteam/e-Paper.git
-            cd e-Paper
-            git sparse-checkout set RaspberryPi_JetsonNano
-            cd RaspberryPi_JetsonNano/python
-            pip3 install . --break-system-packages >/dev/null 2>&1
-            log "SUCCESS" "Installed Waveshare e-Paper library"
+            local epd_cloned=false
+            # Try git sparse-checkout first (smallest download)
+            if [ "$GIT_WORKS" = true ]; then
+                if git clone --depth=1 --filter=blob:none --sparse https://github.com/waveshareteam/e-Paper.git 2>/dev/null \
+                   && cd e-Paper \
+                   && git sparse-checkout set RaspberryPi_JetsonNano 2>/dev/null; then
+                    epd_cloned=true
+                else
+                    log "WARNING" "git sparse-checkout failed for e-Paper repo"
+                    cd /home/$ragnar_USER
+                    rm -rf e-Paper 2>/dev/null
+                fi
+            fi
+            # Fallback: download full tarball with wget/curl
+            if [ "$epd_cloned" = false ]; then
+                log "INFO" "Downloading e-Paper library via tarball..."
+                if clone_or_download https://github.com/waveshareteam/e-Paper.git e-Paper main; then
+                    cd e-Paper
+                    epd_cloned=true
+                else
+                    log "ERROR" "Failed to download Waveshare e-Paper library"
+                    cd /home/$ragnar_USER
+                fi
+            fi
+            if [ "$epd_cloned" = true ] && [ -d "RaspberryPi_JetsonNano/python" ]; then
+                cd RaspberryPi_JetsonNano/python
+                pip3 install . --break-system-packages >/dev/null 2>&1
+                log "SUCCESS" "Installed Waveshare e-Paper library"
+            else
+                log "ERROR" "Waveshare e-Paper library could not be installed — display auto-detection will fail"
+                log "ERROR" "You can install it manually later from: https://github.com/waveshareteam/e-Paper"
+            fi
+            cd /home/$ragnar_USER
         else
             log "INFO" "Waveshare e-Paper repository already exists"
-            cd e-Paper/RaspberryPi_JetsonNano/python
-            pip3 install . --break-system-packages >/dev/null 2>&1
+            if [ -d "e-Paper/RaspberryPi_JetsonNano/python" ]; then
+                cd e-Paper/RaspberryPi_JetsonNano/python
+                pip3 install . --break-system-packages >/dev/null 2>&1
+                cd /home/$ragnar_USER
+            else
+                log "WARNING" "e-Paper directory exists but missing RaspberryPi_JetsonNano/python — try removing e-Paper/ and re-running"
+            fi
         fi
 
         echo -e "\n${BLUE}E-Paper Display Auto-Detection${NC}"
