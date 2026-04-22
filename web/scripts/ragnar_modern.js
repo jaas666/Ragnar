@@ -7261,6 +7261,7 @@ function displayWifiNetworks(data, options = {}) {
                         </div>
                     </div>
                     <div class="flex items-center space-x-2">
+                        ${deleteBtn}
                         ${editBtn}
                         ${securityIcon}
                         <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -7331,6 +7332,24 @@ function closeWifiConnectModal() {
         modal.classList.remove('flex');
     }
     selectedWifiNetwork = null;
+}
+
+async function forgetWifiNetwork(ssid) {
+    if (!confirm(`Forget network "${ssid}"? You will need to re-enter the password to connect again.`)) {
+        return;
+    }
+    try {
+        const data = await postAPI('/api/wifi/forget', { ssid });
+        if (data.success) {
+            addConsoleMessage(`Forgot Wi-Fi network: ${ssid}`, 'success');
+            scanWifiNetworks();
+        } else {
+            addConsoleMessage(`Failed to forget network: ${data.message || 'Unknown error'}`, 'error');
+        }
+    } catch (error) {
+        console.error('Error forgetting network:', error);
+        addConsoleMessage(`Error forgetting network: ${error.message}`, 'error');
+    }
 }
 
 function togglePasswordVisibility() {
@@ -11960,6 +11979,7 @@ window.openWifiConnectModal = openWifiConnectModal;
 window.closeWifiConnectModal = closeWifiConnectModal;
 window.togglePasswordVisibility = togglePasswordVisibility;
 window.connectToWifiNetwork = connectToWifiNetwork;
+window.forgetWifiNetwork = forgetWifiNetwork;
 
 // Bluetooth Management Functions
 window.refreshBluetoothStatus = refreshBluetoothStatus;

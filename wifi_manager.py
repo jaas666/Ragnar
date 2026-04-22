@@ -165,6 +165,26 @@ class WiFiManager:
             self.logger.debug(f"Unable to detect secondary WiFi interface: {exc}")
         return None
 
+    @staticmethod
+    def _parse_nmcli_terse_line(line):
+        """Parse a single nmcli terse-mode line, handling escaped colons (\\:) in field values."""
+        parts = []
+        current = ''
+        i = 0
+        while i < len(line):
+            if line[i] == '\\' and i + 1 < len(line) and line[i + 1] == ':':
+                current += ':'
+                i += 2
+            elif line[i] == ':':
+                parts.append(current)
+                current = ''
+                i += 1
+            else:
+                current += line[i]
+                i += 1
+        parts.append(current)
+        return parts
+
     def _cache_interface_networks(self, interface, networks):
         """Cache scan results per interface while preserving legacy attributes."""
         target_iface = self._resolve_scan_interface(interface)
@@ -1263,21 +1283,22 @@ class WiFiManager:
             networks = []
             if result.returncode == 0:
                 for line in result.stdout.strip().split('\n'):
-                    if line and ':' in line:
-                        parts = line.split(':')
-                        if len(parts) >= 3 and parts[0]:  # SSID not empty
-                            ssid = parts[0]
-                            # Security field may contain colons, rejoin remaining parts
-                            security = ':'.join(parts[2:]) if len(parts) > 3 else (parts[2] if parts[2] else 'Open')
-                            # Mark as known if EITHER in Ragnar's list OR has system profile
-                            is_known = ssid in ragnar_known or ssid in system_profiles
-                            networks.append({
-                                'ssid': ssid,
-                                'signal': int(parts[1]) if parts[1].isdigit() else 0,
-                                'security': security if security else 'Open',
-                                'known': is_known,
-                                'has_system_profile': ssid in system_profiles
-                            })
+                    if not line:
+                        continue
+                    parts = self._parse_nmcli_terse_line(line)
+                    # Need at least SSID and SIGNAL (security may be empty for open networks)
+                    if len(parts) >= 2 and parts[0]:
+                        ssid = parts[0]
+                        security = parts[2] if len(parts) > 2 and parts[2] else 'Open'
+                        # Mark as known if EITHER in Ragnar's list OR has system profile
+                        is_known = ssid in ragnar_known or ssid in system_profiles
+                        networks.append({
+                            'ssid': ssid,
+                            'signal': int(parts[1]) if parts[1].isdigit() else 0,
+                            'security': security,
+                            'known': is_known,
+                            'has_system_profile': ssid in system_profiles
+                        })
             
             # Remove duplicates and sort by signal strength
             seen_ssids = set()
@@ -1369,19 +1390,21 @@ class WiFiManager:
 
             networks = []
             for line in result.stdout.strip().split('\n'):
-                if line and ':' in line:
-                    parts = line.split(':')
-                    if len(parts) >= 3 and parts[0]:
-                        ssid = parts[0]
-                        is_known = ssid in known_set or ssid in system_profiles
-                        networks.append({
-                            'ssid': ssid,
-                            'signal': int(parts[1]) if parts[1].isdigit() else 0,
-                            'security': parts[2] if parts[2] else 'Open',
-                            'known': is_known,
-                            'has_system_profile': ssid in system_profiles,
-                            'scan_method': 'secondary_nmcli'
-                        })
+                if not line:
+                    continue
+                parts = self._parse_nmcli_terse_line(line)
+                if len(parts) >= 2 and parts[0]:
+                    ssid = parts[0]
+                    security = parts[2] if len(parts) > 2 and parts[2] else 'Open'
+                    is_known = ssid in known_set or ssid in system_profiles
+                    networks.append({
+                        'ssid': ssid,
+                        'signal': int(parts[1]) if parts[1].isdigit() else 0,
+                        'security': security,
+                        'known': is_known,
+                        'has_system_profile': ssid in system_profiles,
+                        'scan_method': 'secondary_nmcli'
+                    })
 
             # Deduplicate and sort by signal
             seen = set()
