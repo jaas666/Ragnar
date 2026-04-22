@@ -7262,7 +7262,7 @@ function displayWifiNetworks(data, options = {}) {
     }).join('');
 }
 
-function openWifiConnectModal(ssid, isKnown) {
+function openWifiConnectModal(ssid, isKnown, isSecure) {
     const modal = document.getElementById('wifi-connect-modal');
     const ssidInput = document.getElementById('wifi-connect-ssid');
     const passwordSection = document.getElementById('wifi-password-section');
@@ -7272,7 +7272,7 @@ function openWifiConnectModal(ssid, isKnown) {
     if (!modal || !ssidInput) return;
     
     // Store selected network
-    selectedWifiNetwork = { ssid, isKnown };
+    selectedWifiNetwork = { ssid, isKnown, isSecure };
     
     // Set SSID
     ssidInput.value = ssid;
@@ -7282,9 +7282,9 @@ function openWifiConnectModal(ssid, isKnown) {
         passwordInput.value = '';
     }
     
-    // Hide/show password section based on whether network is known
+    // Hide/show password section: hide for known networks and open (unsecured) networks
     if (passwordSection) {
-        if (isKnown) {
+        if (isKnown || !isSecure) {
             passwordSection.style.display = 'none';
         } else {
             passwordSection.style.display = 'block';
@@ -7345,11 +7345,12 @@ async function connectToWifiNetwork() {
     
     const ssid = selectedWifiNetwork.ssid;
     const isKnown = selectedWifiNetwork.isKnown;
-    const password = isKnown ? null : (passwordInput ? passwordInput.value : '');
+    const isSecure = selectedWifiNetwork.isSecure;
+    const password = (isKnown || !isSecure) ? null : (passwordInput ? passwordInput.value : '');
     const saveNetwork = saveCheckbox ? saveCheckbox.checked : true;
     
-    // Validate password for new networks
-    if (!isKnown && !password) {
+    // Validate password for new secured networks (not needed for open networks)
+    if (!isKnown && isSecure && !password) {
         if (statusDiv) {
             statusDiv.classList.remove('hidden');
             statusDiv.innerHTML = '<div class="bg-red-600 rounded p-3 text-sm">Please enter a password</div>';
