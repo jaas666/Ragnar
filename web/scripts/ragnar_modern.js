@@ -12062,13 +12062,19 @@ function displayGroupedVulnerabilities(data) {
     document.getElementById('high-vuln-count').textContent = highTotal;
     
     if (!data.grouped_vulnerabilities || data.grouped_vulnerabilities.length === 0) {
+        const emptyMessages = {
+            open:     { title: 'No Open Vulnerabilities',      sub: 'No unresolved vulnerabilities match the current filter.' },
+            resolved: { title: 'No Resolved Vulnerabilities',  sub: 'None of the discovered vulnerabilities have been marked as resolved yet.' },
+            all:      { title: 'No Vulnerabilities Found',     sub: 'All discovered hosts appear to be secure!' },
+        };
+        const msg = emptyMessages[threatIntelStatusFilter] || emptyMessages.all;
         container.innerHTML = `
             <div class="glass rounded-lg p-6 text-center">
                 <svg class="w-16 h-16 mx-auto mb-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                 </svg>
-                <h3 class="text-xl font-semibold text-white mb-2">No Vulnerabilities Found</h3>
-                <p class="text-slate-400">All discovered hosts appear to be secure!</p>
+                <h3 class="text-xl font-semibold text-white mb-2">${msg.title}</h3>
+                <p class="text-slate-400">${msg.sub}</p>
             </div>
         `;
         return;
