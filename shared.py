@@ -115,6 +115,7 @@ DISPLAY_PROFILES = {
     "epd2in13_V2": {"ref_width": DESIGN_REF_WIDTH, "ref_height": DESIGN_REF_HEIGHT, "default_flip": False},
     "epd2in13_V3": {"ref_width": DESIGN_REF_WIDTH, "ref_height": DESIGN_REF_HEIGHT, "default_flip": True},
     "epd2in13_V4": {"ref_width": DESIGN_REF_WIDTH, "ref_height": DESIGN_REF_HEIGHT, "default_flip": False},
+    "epd2in13b_V4": {"ref_width": DESIGN_REF_WIDTH, "ref_height": DESIGN_REF_HEIGHT, "default_flip": False},
     # Waveshare 4.26" 800x480 e-paper (landscape) — use DESIGN_REF so the
     # scale-factor system uniformly scales the 122×250 layout up.  The
     # vertical factor (480/250 = 1.92) dominates; we use that for the
