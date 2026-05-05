@@ -42,6 +42,57 @@ def normalize_rotation(value):
         return 180
     return 0
 from datetime import datetime
+
+_detected_wifi_interface = None
+_detected_wifi_interface_time = 0
+
+def detect_wifi_interface(configured='auto'):
+    """Detect the primary WiFi interface dynamically.
+
+    If *configured* is an explicit interface name (not 'auto'), return it as-is.
+    Otherwise auto-detect via nmcli, then sysfs, falling back to 'wlan0'.
+    Results are cached for 60 seconds to avoid repeated subprocess calls.
+    """
+    global _detected_wifi_interface, _detected_wifi_interface_time
+
+    if configured and configured != 'auto':
+        return configured
+
+    now = time.time()
+    if _detected_wifi_interface and (now - _detected_wifi_interface_time) < 60:
+        return _detected_wifi_interface
+
+    # Method 1: nmcli — first managed wifi device
+    try:
+        result = subprocess.run(
+            ['nmcli', '-t', '-f', 'DEVICE,TYPE', 'device'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().split('\n'):
+                parts = line.split(':')
+                if len(parts) >= 2 and parts[1] == 'wifi':
+                    _detected_wifi_interface = parts[0]
+                    _detected_wifi_interface_time = now
+                    return _detected_wifi_interface
+    except Exception:
+        pass
+
+    # Method 2: sysfs — pick first interface that has wireless/ directory
+    try:
+        for name in sorted(os.listdir('/sys/class/net')):
+            if os.path.isdir(f'/sys/class/net/{name}/wireless'):
+                _detected_wifi_interface = name
+                _detected_wifi_interface_time = now
+                return _detected_wifi_interface
+    except Exception:
+        pass
+
+    # Fallback
+    _detected_wifi_interface = 'wlan0'
+    _detected_wifi_interface_time = now
+    return _detected_wifi_interface
+
 try:
     from PIL import Image, ImageFont
 except ImportError:
@@ -621,7 +672,7 @@ class SharedData:
             
             "__title_wifi__": "Wi-Fi Management",
             "wifi_known_networks": [],
-            "wifi_default_interface": "wlan0",
+            "wifi_default_interface": "auto",
             "wifi_ap_ssid": "Ragnar",
             "wifi_ap_password": "ragnarconnect",
             "wifi_connection_timeout": 60,

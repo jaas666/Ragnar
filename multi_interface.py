@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 
 from logger import Logger
 from wifi_interfaces import gather_wifi_interfaces, gather_ethernet_interfaces, is_ethernet_available, get_active_ethernet_interface, is_link_local_ip
+from shared import detect_wifi_interface
 
 logger = Logger(name="multi_interface", level=logging.INFO)
 
@@ -85,12 +86,17 @@ class MultiInterfaceState:
         self.last_refresh = 0.0
         self.ethernet_last_refresh = 0.0
 
+    @property
+    def _default_iface(self) -> str:
+        """Resolve the configured default WiFi interface (handles 'auto')."""
+        return detect_wifi_interface(self.shared_data.config.get('wifi_default_interface', 'auto'))
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     def refresh_from_system(self) -> List[Dict]:
         """Probe system interfaces and update cached state."""
-        default_iface = self.shared_data.config.get('wifi_default_interface', 'wlan0')
+        default_iface = self._default_iface
         discovered = gather_wifi_interfaces(default_iface)
         self.sync_from_interfaces(discovered)
         # Also refresh Ethernet interfaces
@@ -215,7 +221,7 @@ class MultiInterfaceState:
         selected = self._select_interfaces(interfaces)
         timestamp = time.time()
         global_enabled = self.is_multi_mode_enabled()
-        default_iface = self.shared_data.config.get('wifi_default_interface', 'wlan0')
+        default_iface = self._default_iface
         focus_interface = self.get_focus_interface()
 
         with self._lock:
@@ -495,7 +501,7 @@ class MultiInterfaceState:
         return candidate
 
     def _auto_focus_interface(self) -> Optional[str]:
-        default_iface = self.shared_data.config.get('wifi_default_interface', 'wlan0')
+        default_iface = self._default_iface
         with self._lock:
             if default_iface in self.interfaces:
                 return default_iface
@@ -519,7 +525,7 @@ class MultiInterfaceState:
 
     def _select_interfaces(self, interfaces: List[Dict]) -> List[Dict]:
         max_interfaces = max(1, int(self.shared_data.config.get('wifi_multi_scan_max_interfaces', 2)))
-        default_iface = self.shared_data.config.get('wifi_default_interface', 'wlan0')
+        default_iface = self._default_iface
         hint = (self.shared_data.config.get('wifi_external_interface_hint') or '').strip()
 
         primary = next((iface for iface in interfaces if iface.get('name') == default_iface), None)

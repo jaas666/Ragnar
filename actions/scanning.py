@@ -135,7 +135,8 @@ class NetworkScanner:
                         return iface
         except Exception:
             pass
-        return 'wlan0'
+        from shared import detect_wifi_interface
+        return detect_wifi_interface('auto')
 
     @staticmethod
     def _is_valid_mac(value):

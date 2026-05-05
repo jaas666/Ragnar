@@ -147,6 +147,10 @@ def _get_interface_link_details(interface_name: str) -> Dict[str, Optional[str]]
 
 def gather_wifi_interfaces(default_interface: str = 'wlan0') -> List[Dict]:
     """Collect Wi-Fi interface metadata using nmcli + ip link fallbacks."""
+    # Resolve 'auto' to actual interface name
+    if default_interface == 'auto':
+        from shared import detect_wifi_interface
+        default_interface = detect_wifi_interface('auto')
     interfaces: Dict[str, Dict] = {}
 
     try:

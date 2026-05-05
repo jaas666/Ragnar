@@ -435,7 +435,9 @@ class WebUtils:
 
     def scan_wifi(self, handler):
         try:
-            result = subprocess.Popen(['sudo', 'iwlist', 'wlan0', 'scan'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            from shared import detect_wifi_interface
+            wifi_iface = detect_wifi_interface('auto')
+            result = subprocess.Popen(['sudo', 'iwlist', wifi_iface, 'scan'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             stdout, stderr = result.communicate()
             if result.returncode != 0:
                 raise Exception(stderr)

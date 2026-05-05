@@ -26,6 +26,7 @@ from init_shared import shared_data
 from comment import Commentaireia
 from logger import Logger
 import subprocess  
+from shared import detect_wifi_interface
 
 # Map rotation angle → PIL transpose operation
 _ROTATION_TRANSPOSE = {
@@ -95,6 +96,9 @@ class Display:
         self.screen_reversed = self.shared_data.screen_reversed
         self.web_screen_reversed = self.shared_data.web_screen_reversed
         self.main_image = None  # Initialize main_image variable
+
+        # Resolve WiFi interface name once (cached in detect_wifi_interface)
+        self._wifi_iface = detect_wifi_interface(self.config.get('wifi_default_interface', 'auto'))
 
         # Frise position (x=0 since frise is resized to full display width)
         self.frise_positions = {
@@ -454,7 +458,7 @@ class Display:
         """Return a tuple (signal_dbm, quality_percent) if available."""
         # Primary method: use `iw dev wlan0 link`
         try:
-            result = subprocess.run(['iw', 'dev', 'wlan0', 'link'], capture_output=True, text=True, timeout=2)
+            result = subprocess.run(['iw', 'dev', self._wifi_iface, 'link'], capture_output=True, text=True, timeout=2)
             if result.returncode == 0:
                 for line in result.stdout.split('\n'):
                     if 'signal:' in line:
@@ -474,7 +478,7 @@ class Display:
 
         # Fallback: use `iwconfig`
         try:
-            result = subprocess.run(['iwconfig', 'wlan0'], capture_output=True, text=True, timeout=2)
+            result = subprocess.run(['iwconfig', self._wifi_iface], capture_output=True, text=True, timeout=2)
             if result.returncode == 0:
                 quality = None
                 signal_dbm = None
@@ -567,7 +571,7 @@ class Display:
         """Get the last octet of the WiFi IP address (e.g., '.211' from '192.168.1.211')."""
         try:
             # Get IP address of wlan0 interface
-            result = subprocess.run(['ip', '-4', 'addr', 'show', 'wlan0'], 
+            result = subprocess.run(['ip', '-4', 'addr', 'show', self._wifi_iface], 
                                   capture_output=True, text=True, timeout=2)
             if result.returncode == 0:
                 # Parse the output to find the IP address
@@ -596,7 +600,7 @@ class Display:
                 return True
             
             # Alternative check: see if we're listening on AP interface
-            result = subprocess.run(['ip', 'addr', 'show', 'wlan0'], capture_output=True, text=True)
+            result = subprocess.run(['ip', 'addr', 'show', self._wifi_iface], capture_output=True, text=True)
             if result.returncode == 0 and '192.168.4.1' in result.stdout:
                 return True
                 
@@ -618,7 +622,7 @@ class Display:
                     return wifi_mgr.ap_clients_count
             
             # Fallback to hostapd_cli
-            result = subprocess.run(['hostapd_cli', '-i', 'wlan0', 'list_sta'], 
+            result = subprocess.run(['hostapd_cli', '-i', self._wifi_iface, 'list_sta'], 
                                   capture_output=True, text=True, timeout=2)
             if result.returncode == 0:
                 clients = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
@@ -700,7 +704,7 @@ class Display:
             if self.is_ap_mode_active():
                 # Try to get AP client count
                 try:
-                    result = subprocess.run(['hostapd_cli', '-i', 'wlan0', 'list_sta'], 
+                    result = subprocess.run(['hostapd_cli', '-i', self._wifi_iface, 'list_sta'], 
                                           capture_output=True, text=True, timeout=2)
                     if result.returncode == 0:
                         clients = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]

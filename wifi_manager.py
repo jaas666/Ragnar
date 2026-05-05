@@ -18,6 +18,7 @@ import logging
 import re
 import signal
 from datetime import datetime, timedelta
+from shared import detect_wifi_interface
 from logger import Logger
 from db_manager import get_db
 from wifi_interfaces import gather_wifi_interfaces, get_active_ethernet_interface
@@ -83,7 +84,7 @@ class WiFiManager:
         # Network management
         self.known_networks = []
         self.available_networks = []
-        self.default_wifi_interface = shared_data.config.get('wifi_default_interface', 'wlan0')
+        self.default_wifi_interface = detect_wifi_interface(shared_data.config.get('wifi_default_interface', 'auto'))
         self.interface_scan_cache = {}
         self.interface_cache_time = {}
         self.last_scan_interface = None
@@ -105,7 +106,7 @@ class WiFiManager:
         # AP mode settings
         self.ap_ssid = shared_data.config.get('wifi_ap_ssid', 'Ragnar')
         self.ap_password = shared_data.config.get('wifi_ap_password', 'ragnarconnect')
-        self.ap_interface = "wlan0"
+        self.ap_interface = self.default_wifi_interface
         self.ap_ip = "192.168.4.1"
         self.ap_subnet = "192.168.4.0/24"
         
@@ -1120,18 +1121,18 @@ class WiFiManager:
                 for line in result.stdout.strip().split('\n'):
                     if line and 'yes:802-11-wireless' in line:
                         # Double-check with device status
-                        dev_result = subprocess.run(['nmcli', '-t', '-f', 'DEVICE,STATE', 'dev', 'wifi'], 
+                        dev_result = subprocess.run(['nmcli', '-t', '-f', 'DEVICE,STATE', 'dev', 'status'], 
                                                   capture_output=True, text=True, timeout=5)
                         if dev_result.returncode == 0 and 'connected' in dev_result.stdout:
                             return True
             
             # Method 2: Check using iwconfig (if available)
             try:
-                result = subprocess.run(['iwconfig', 'wlan0'], 
+                result = subprocess.run(['iwconfig', self.default_wifi_interface], 
                                       capture_output=True, text=True, timeout=5)
                 if result.returncode == 0 and 'ESSID:' in result.stdout and 'Not-Associated' not in result.stdout:
                     # Verify we have an IP address
-                    ip_result = subprocess.run(['ip', 'addr', 'show', 'wlan0'], 
+                    ip_result = subprocess.run(['ip', 'addr', 'show', self.default_wifi_interface], 
                                              capture_output=True, text=True, timeout=5)
                     if ip_result.returncode == 0 and 'inet ' in ip_result.stdout:
                         return True
@@ -1146,7 +1147,7 @@ class WiFiManager:
                     # Ensure it's going through wlan0
                     route_result = subprocess.run(['ip', 'route', 'get', '1.1.1.1'], 
                                                 capture_output=True, text=True, timeout=3)
-                    if route_result.returncode == 0 and 'dev wlan0' in route_result.stdout:
+                    if route_result.returncode == 0 and f'dev {self.default_wifi_interface}' in route_result.stdout:
                         return True
             except Exception:
                 pass  # Network unreachable, that's fine
@@ -1208,7 +1209,7 @@ class WiFiManager:
         """Get the current connected SSID"""
         try:
             # Method 1: Get SSID from active connection on wlan0 device
-            result = subprocess.run(['nmcli', '-t', '-f', 'GENERAL.CONNECTION', 'dev', 'show', 'wlan0'], 
+            result = subprocess.run(['nmcli', '-t', '-f', 'GENERAL.CONNECTION', 'dev', 'show', self.default_wifi_interface], 
                                   capture_output=True, text=True, timeout=10)
             if result.returncode == 0 and result.stdout.strip():
                 # Extract connection name (which is usually the SSID for WiFi)
@@ -1807,7 +1808,7 @@ class WiFiManager:
                     self.logger.warning(f"Failed to log disconnection: {db_err}")
             
             # Disconnect using nmcli
-            result = subprocess.run(['nmcli', 'device', 'disconnect', 'wlan0'], 
+            result = subprocess.run(['nmcli', 'device', 'disconnect', self.default_wifi_interface], 
                                   capture_output=True, text=True, timeout=10)
             
             if result.returncode == 0:

@@ -133,7 +133,13 @@ SYNC_BACKGROUND_INTERVAL = 15  # seconds between automatic synchronizations (inc
 scan_results_cache = {}
 processed_scan_files = {}  # Track which files we've already processed: {filename: mtime}
 
-DEFAULT_ARP_SCAN_INTERFACE = 'wlan0'
+DEFAULT_ARP_SCAN_INTERFACE = 'wlan0'  # legacy fallback only; prefer _get_wifi_iface()
+
+def _get_wifi_iface():
+    """Return the configured/auto-detected WiFi interface name."""
+    from shared import detect_wifi_interface
+    return detect_wifi_interface(shared_data.config.get('wifi_default_interface', 'auto'))
+
 SEP_SCAN_COMMAND = ['sudo', 'sep-scan']
 MAC_REGEX = re.compile(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$')
 PWN_INSTALL_SCRIPT = os.path.join(shared_data.currentdir, 'scripts', 'install_pwnagotchi.sh')
@@ -5383,7 +5389,7 @@ def get_verbose_debug_logs():
         # Test ARP scan directly
         try:
             debug_info['api_traces'].append("=== TESTING ARP SCAN DIRECTLY ===")
-            test_arp_result = run_arp_scan_localnet('wlan0')
+            test_arp_result = run_arp_scan_localnet(_get_wifi_iface())
             debug_info['cache_state']['direct_arp_test'] = {
                 'success': bool(test_arp_result),
                 'host_count': len(test_arp_result) if test_arp_result else 0,
@@ -5864,7 +5870,7 @@ def force_arp_scan():
         }
         
         debug_info['steps'].append("Step 1: Running ARP scan...")
-        arp_hosts = run_arp_scan_localnet('wlan0')
+        arp_hosts = run_arp_scan_localnet(_get_wifi_iface())
         debug_info['steps'].append(f"Step 2: Found {len(arp_hosts) if arp_hosts else 0} hosts")
         
         if arp_hosts:
@@ -6130,7 +6136,7 @@ ARP_SCAN_INTERVAL = 60  # seconds
 def get_arp_scan_localnet():
     """Get ARP scan results for local network"""
     try:
-        interface = request.args.get('interface', 'wlan0')
+        interface = request.args.get('interface', _get_wifi_iface())
         hosts = run_arp_scan_localnet(interface)
         
         return jsonify({
@@ -6176,7 +6182,7 @@ def get_nmap_ping_scan():
 def get_combined_network_scan():
     """Get combined results from both ARP and nmap scans"""
     try:
-        interface = request.args.get('interface', 'wlan0')
+        interface = request.args.get('interface', _get_wifi_iface())
         network = request.args.get('network', '192.168.1.0/24')
         
         # Run both scans
@@ -7850,7 +7856,7 @@ def _parse_wifi_interface_arg(raw_value):
 
 
 def _gather_wifi_interfaces() -> List[Dict]:
-    interfaces = gather_wifi_interfaces(shared_data.config.get('wifi_default_interface', 'wlan0'))
+    interfaces = gather_wifi_interfaces(shared_data.config.get('wifi_default_interface', 'auto'))
     state = getattr(shared_data, 'multi_interface_state', None)
     if state:
         try:
@@ -7887,7 +7893,7 @@ def get_wifi_interfaces():
             'success': False,
             'error': str(e),
             'interfaces': [{
-                'name': 'wlan0',
+                'name': _get_wifi_iface(),
                 'state': 'UNKNOWN',
                 'is_default': True,
                 'connected_ssid': None,
@@ -7912,7 +7918,7 @@ def get_wifi_status():
         except Exception as interface_error:
             logger.error(f"Failed to gather Wi-Fi interfaces: {interface_error}")
             interfaces = [{
-                'name': 'wlan0',
+                'name': _get_wifi_iface(),
                 'state': 'UNKNOWN',
                 'is_default': True,
                 'connected_ssid': None,
@@ -8180,7 +8186,7 @@ def scan_wifi_networks():
         wifi_manager = getattr(shared_data, 'ragnar_instance', None)
         if wifi_manager and hasattr(wifi_manager, 'wifi_manager'):
             manager = wifi_manager.wifi_manager
-            effective_interface = requested_interface or getattr(manager, 'default_wifi_interface', 'wlan0')
+            effective_interface = requested_interface or getattr(manager, 'default_wifi_interface', _get_wifi_iface())
             known_networks = []
             try:
                 known_networks = manager.get_known_networks()
@@ -8259,7 +8265,7 @@ def get_wifi_networks():
         wifi_manager = getattr(shared_data, 'ragnar_instance', None)
         if wifi_manager and hasattr(wifi_manager, 'wifi_manager'):
             manager = wifi_manager.wifi_manager
-            effective_interface = requested_interface or getattr(manager, 'default_wifi_interface', 'wlan0')
+            effective_interface = requested_interface or getattr(manager, 'default_wifi_interface', _get_wifi_iface())
             
             # For captive portal/AP clients, use lightweight response
             if is_ap_client_request():
@@ -8640,7 +8646,7 @@ def get_wifi_log():
             
             # Get IP address
             try:
-                result = subprocess.run(['ip', 'addr', 'show', 'wlan0'], capture_output=True, text=True, timeout=3)
+                result = subprocess.run(['ip', 'addr', 'show', _get_wifi_iface()], capture_output=True, text=True, timeout=3)
                 if result.returncode == 0:
                     ip_match = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', result.stdout)
                     wifi_log_data['system_wifi']['ip_address'] = ip_match.group(1) if ip_match else None
@@ -10868,7 +10874,7 @@ def background_arp_scan_loop():
                 
                 def run_arp():
                     nonlocal arp_hosts
-                    arp_hosts = run_arp_scan_localnet('wlan0')
+                    arp_hosts = run_arp_scan_localnet(_get_wifi_iface())
                 
                 arp_thread = threading.Thread(target=run_arp, daemon=True)
                 arp_thread.start()
