@@ -14675,17 +14675,15 @@ async function refreshWardrivingStatus() {
 
 function updateWardrivingUI(status) {
     const badge = document.getElementById('wd-status-badge');
-    const startBtn = document.getElementById('wd-start-btn');
-    const stopBtn = document.getElementById('wd-stop-btn');
+
+    // Sync running state and toggle button
+    _wardrivingRunning = !!status.running;
+    updateWardrivingToggleButton();
 
     if (status.running) {
         if (badge) { badge.textContent = 'Running'; badge.className = 'px-2 py-1 bg-emerald-600 bg-opacity-30 text-emerald-400 text-xs rounded-full animate-pulse'; }
-        if (startBtn) startBtn.classList.add('hidden');
-        if (stopBtn) stopBtn.classList.remove('hidden');
     } else {
         if (badge) { badge.textContent = 'Stopped'; badge.className = 'px-2 py-1 bg-gray-600 bg-opacity-30 text-gray-400 text-xs rounded-full'; }
-        if (startBtn) startBtn.classList.remove('hidden');
-        if (stopBtn) stopBtn.classList.add('hidden');
     }
 
     // GPS
@@ -14793,68 +14791,68 @@ function renderWardrivingSessions(sessions) {
     `).join('');
 }
 
+let _wardrivingRunning = false;
 let _wardrivingBusy = false;
-async function startWardriving() {
+
+async function toggleWardriving() {
     if (_wardrivingBusy) return;
     _wardrivingBusy = true;
-    const startBtn = document.getElementById('wd-start-btn');
-    if (startBtn) { startBtn.disabled = true; startBtn.classList.add('opacity-50', 'pointer-events-none'); }
+    const btn = document.getElementById('wd-toggle-btn');
+    if (btn) { btn.disabled = true; btn.classList.add('opacity-50', 'pointer-events-none'); }
     try {
-        const res = await fetch('/api/wardriving/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' });
+        const endpoint = _wardrivingRunning ? '/api/wardriving/stop' : '/api/wardriving/start';
+        const res = await fetch(endpoint, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' });
         const data = await res.json();
         if (data.error) {
             showToast(data.error, 'error');
             return;
         }
-        showToast(`Wardriving started! Session: ${data.session_id}`, 'success');
-        // Immediate UI flip
-        if (startBtn) startBtn.classList.add('hidden');
-        const stopBtn = document.getElementById('wd-stop-btn');
-        if (stopBtn) stopBtn.classList.remove('hidden');
-        const badge = document.getElementById('wd-status-badge');
-        if (badge) { badge.textContent = 'Running'; badge.className = 'px-2 py-1 bg-emerald-600 bg-opacity-30 text-emerald-400 text-xs rounded-full animate-pulse'; }
-        // Start polling immediately
-        if (!_wardrivingInterval) {
-            _wardrivingInterval = setInterval(refreshWardrivingStatus, 3000);
+        _wardrivingRunning = !_wardrivingRunning;
+        updateWardrivingToggleButton();
+        if (_wardrivingRunning) {
+            showToast(`Wardriving started! Session: ${data.session_id}`, 'success');
+            if (!_wardrivingInterval) {
+                _wardrivingInterval = setInterval(refreshWardrivingStatus, 3000);
+            }
+        } else {
+            showToast(`Wardriving stopped. ${data.stats?.total_networks || 0} networks found.`, 'success');
+            if (_wardrivingInterval) {
+                clearInterval(_wardrivingInterval);
+                _wardrivingInterval = null;
+            }
         }
         await loadWardrivingData();
     } catch (e) {
-        showToast('Failed to start wardriving', 'error');
+        showToast('Failed to toggle wardriving', 'error');
     } finally {
         _wardrivingBusy = false;
-        if (startBtn) { startBtn.disabled = false; startBtn.classList.remove('opacity-50', 'pointer-events-none'); }
+        if (btn) { btn.disabled = false; btn.classList.remove('opacity-50', 'pointer-events-none'); }
     }
 }
 
-async function stopWardriving() {
-    if (_wardrivingBusy) return;
-    _wardrivingBusy = true;
-    const stopBtn = document.getElementById('wd-stop-btn');
-    if (stopBtn) { stopBtn.disabled = true; stopBtn.classList.add('opacity-50', 'pointer-events-none'); }
-    try {
-        const res = await fetch('/api/wardriving/stop', { method: 'POST' });
-        const data = await res.json();
-        if (data.error) {
-            showToast(data.error, 'error');
-            return;
-        }
-        showToast(`Wardriving stopped. ${data.stats?.total_networks || 0} networks found.`, 'success');
-        if (_wardrivingInterval) {
-            clearInterval(_wardrivingInterval);
-            _wardrivingInterval = null;
-        }
-        // Immediate UI flip
-        if (stopBtn) stopBtn.classList.add('hidden');
-        const startBtn = document.getElementById('wd-start-btn');
-        if (startBtn) startBtn.classList.remove('hidden');
-        const badge = document.getElementById('wd-status-badge');
-        if (badge) { badge.textContent = 'Stopped'; badge.className = 'px-2 py-1 bg-gray-600 bg-opacity-30 text-gray-400 text-xs rounded-full'; }
-        await loadWardrivingData();
-    } catch (e) {
-        showToast('Failed to stop wardriving', 'error');
-    } finally {
-        _wardrivingBusy = false;
-        if (stopBtn) { stopBtn.disabled = false; stopBtn.classList.remove('opacity-50', 'pointer-events-none'); }
+function updateWardrivingToggleButton() {
+    const btn = document.getElementById('wd-toggle-btn');
+    if (!btn) return;
+    if (_wardrivingRunning) {
+        btn.innerHTML = `
+            <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"></path>
+            </svg>
+            Stop
+        `;
+        btn.classList.remove('bg-green-600', 'hover:bg-green-700');
+        btn.classList.add('bg-red-600', 'hover:bg-red-700');
+    } else {
+        btn.innerHTML = `
+            <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+            </svg>
+            Start
+        `;
+        btn.classList.remove('bg-red-600', 'hover:bg-red-700');
+        btn.classList.add('bg-green-600', 'hover:bg-green-700');
     }
 }
 

@@ -668,7 +668,6 @@ class WardrivingEngine:
             if line.startswith('BSS '):
                 if current and current.get('bssid'):
                     current['ssid'] = _sanitize_ssid(current.get('ssid', ''))
-                        current['ssid'] = ''
                     networks.append(current)
                 # BSS aa:bb:cc:dd:ee:ff(on wlan0) -- associated
                 bssid_match = re.match(r'BSS\s+([0-9a-fA-F:]{17})', line)
