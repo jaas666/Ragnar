@@ -829,6 +829,9 @@ class WardrivingEngine:
         self.serial_connected = False
         self.serial_networks = 0
         self._serial_entry_buffer = {}  # Buffer for multi-line GhostESP entries
+        self._current_ghost_mode = 'wifi'
+        self._ghost_ble_count = 0
+        self._ghost_stations = []
 
     def start(self, interfaces=None, gps_port=None, device_name=None):
         """Start a wardriving session."""
@@ -989,6 +992,8 @@ class WardrivingEngine:
             'serial_connected': self.serial_connected,
             'serial_port': self._serial_port or '',
             'serial_networks': self.serial_networks,
+            'ghost_mode': getattr(self, '_current_ghost_mode', ''),
+            'ghost_ble_count': getattr(self, '_ghost_ble_count', 0),
         }
         if self.session:
             result['stats'] = self.session.get_stats()
@@ -1506,9 +1511,11 @@ class WardrivingEngine:
     def _serial_listen_loop(self):
         """Listen for wardriving data from a USB-connected ESP32 (Piglet/GhostESP).
 
-        Parses two formats:
-        1. WiGLE CSV lines: MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,Lat,Lon,Alt,Acc,Type
-        2. JSON lines: {"mac":"...","ssid":"...","rssi":...,"channel":...,"lat":...,"lon":...}
+        Rotates through GhostESP commands to maximize data collection:
+        - scanap: WiFi network scanning
+        - blescan -r: BLE device scanning
+        - scansta: Station/client scanning
+        - pineap: PineAP/Evil Twin detection
         """
         logger.info(f"Serial ESP32 listener starting on {self._serial_port}")
         try:
@@ -1517,32 +1524,61 @@ class WardrivingEngine:
             logger.error("pyserial not installed - serial listener disabled")
             return
 
+        # Scan cycle: command, duration(s), description
+        scan_cycle = [
+            (b"scanap\r\n", 12, "wifi"),
+            (b"blescan -r\r\n", 8, "ble"),
+            (b"scanap\r\n", 12, "wifi"),
+            (b"scansta\r\n", 6, "stations"),
+        ]
+
         while self._running:
             try:
                 ser = pyserial.Serial(self._serial_port, 115200, timeout=2)
                 self.serial_connected = True
                 logger.info(f"Serial connected: {self._serial_port}")
 
-                # Send scanap command to start WiFi scanning
-                ser.write(b"scanap\r\n")
-                last_scan_time = time.time()
+                cycle_index = 0
 
                 while self._running:
+                    # Send next scan command
+                    cmd, duration, scan_type = scan_cycle[cycle_index % len(scan_cycle)]
+                    self._current_ghost_mode = scan_type
                     try:
-                        raw = ser.readline()
-                        if not raw:
-                            # Periodically re-trigger scan every 15s
-                            if time.time() - last_scan_time > 15:
-                                ser.write(b"scanap\r\n")
-                                last_scan_time = time.time()
-                            continue
-                        line = raw.decode('utf-8', errors='replace').strip()
-                        if not line:
-                            continue
-                        self._parse_serial_line(line)
-                    except Exception as e:
-                        logger.debug(f"Serial read error: {e}")
+                        ser.write(b"stop\r\n")
+                        time.sleep(0.3)
+                        ser.reset_input_buffer()
+                        ser.write(cmd)
+                        logger.debug(f"GhostESP cmd: {cmd.strip()}")
+                    except Exception:
                         break
+
+                    # Read output for the duration
+                    end_time = time.time() + duration
+                    while self._running and time.time() < end_time:
+                        try:
+                            raw = ser.readline()
+                            if not raw:
+                                continue
+                            line = raw.decode('utf-8', errors='replace').strip()
+                            if not line:
+                                continue
+                            self._parse_serial_line(line)
+                        except Exception as e:
+                            logger.debug(f"Serial read error: {e}")
+                            break
+
+                    # Flush any buffered multi-line entry
+                    if self._serial_entry_buffer.get('bssid'):
+                        pos = self._gps.get_position() if self._gps else None
+                        self._flush_serial_entry(
+                            pos['lat'] if pos else None,
+                            pos['lon'] if pos else None,
+                            pos.get('alt') if pos else None
+                        )
+                        self._serial_entry_buffer = {}
+
+                    cycle_index += 1
 
                 ser.close()
             except Exception as e:
@@ -1569,6 +1605,60 @@ class WardrivingEngine:
 
         # Skip GhostESP prompt and status lines
         if line.startswith('ghost-cli>') or line.startswith('Wardrive:') or line.startswith('Registered') or line.startswith('Unsupported'):
+            return
+        # Skip empty scan results and help text
+        if line.startswith('WiFi scan') or line.startswith('Started') or line.startswith('Stopped') or line.startswith('Usage:'):
+            return
+
+        # === Pineapple / Evil Twin / Skimmer detection ===
+        if 'Pineapple detected' in line or 'POTENTIAL SKIMMER' in line or 'Evil Twin' in line:
+            logger.warning(f"[GhostESP ALERT] {line}")
+            if hasattr(self, '_ghost_alerts'):
+                self._ghost_alerts.append({'time': time.time(), 'alert': line})
+            else:
+                self._ghost_alerts = [{'time': time.time(), 'alert': line}]
+            return
+
+        # === BLE scan output ===
+        # GhostESP BLE raw output: "Name: DevName, MAC: AA:BB:CC:DD:EE:FF, RSSI: -70"
+        # or flipper format: "Flipper Found! Name: ... MAC: ..."
+        ble_match = re.match(
+            r'(?:.*?)?(?:Name|Device\s*Name):\s*(.+?)(?:,\s*|\s+)MAC(?:\s*Address)?:\s*([0-9a-fA-F:]{17})(?:.*?RSSI:\s*(-?\d+))?',
+            line
+        )
+        if not ble_match:
+            # Alternate format: "MAC: xx:xx... Name: ... RSSI: ..."
+            ble_match = re.match(
+                r'MAC(?:\s*Address)?:\s*([0-9a-fA-F:]{17})(?:.*?(?:Name|Device):\s*(.+?))?(?:.*?RSSI:\s*(-?\d+))?',
+                line
+            )
+            if ble_match:
+                mac = ble_match.group(1).upper()
+                name = (ble_match.group(2) or '').strip().rstrip(',')
+                rssi_str = ble_match.group(3)
+                rssi = int(rssi_str) if rssi_str else -80
+                ble_type = 'BLE'
+                if 'Flipper' in line:
+                    ble_type = 'Flipper'
+                elif 'AirTag' in line:
+                    ble_type = 'AirTag'
+                elif 'Skimmer' in line:
+                    ble_type = 'Skimmer'
+                self.session.upsert_bluetooth(mac, name, rssi, ble_type, gps_lat, gps_lon, gps_alt)
+                self._ghost_ble_count += 1
+                return
+        elif ble_match:
+            name = ble_match.group(1).strip().rstrip(',')
+            mac = ble_match.group(2).upper()
+            rssi_str = ble_match.group(3)
+            rssi = int(rssi_str) if rssi_str else -80
+            ble_type = 'BLE'
+            if 'Flipper' in line:
+                ble_type = 'Flipper'
+            elif 'AirTag' in line:
+                ble_type = 'AirTag'
+            self.session.upsert_bluetooth(mac, name, rssi, ble_type, gps_lat, gps_lon, gps_alt)
+            self._ghost_ble_count += 1
             return
 
         # Try JSON format first (GhostESP style)

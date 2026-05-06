@@ -14770,6 +14770,13 @@ function updateWardrivingUI(status) {
             updateElement('wd-ghost-port', status.serial_port || '');
             updateElement('wd-ghost-net-count', String(status.serial_networks || 0));
             updateElement('wd-ghost-unique', String(status.serial_unique || 0));
+            // Show current scan mode and BLE count
+            const modeEl = document.getElementById('wd-ghost-mode');
+            if (modeEl) {
+                const modeLabels = {wifi: 'WiFi', ble: 'BLE', stations: 'Stations'};
+                modeEl.textContent = modeLabels[status.ghost_mode] || status.ghost_mode || '';
+            }
+            updateElement('wd-ghost-ble-count', String(status.ghost_ble_count || 0));
         } else {
             ghostBar.classList.add('hidden');
         }
