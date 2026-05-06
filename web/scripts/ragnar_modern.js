@@ -14693,7 +14693,7 @@ function updateWardrivingUI(status) {
     const gpsSats = document.getElementById('wd-gps-sats');
     if (gpsStatus) {
         if (gps.has_fix) {
-            gpsStatus.textContent = 'Fix OK';
+            gpsStatus.textContent = 'GPS-Fix OK';
             gpsStatus.className = 'text-lg font-bold text-emerald-400';
         } else if (gps.connected && status.running) {
             gpsStatus.textContent = 'Searching...';
