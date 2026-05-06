@@ -994,6 +994,7 @@ class WardrivingEngine:
             'serial_networks': self.serial_networks,
             'ghost_mode': getattr(self, '_current_ghost_mode', ''),
             'ghost_ble_count': getattr(self, '_ghost_ble_count', 0),
+            'ghost_alerts': getattr(self, '_ghost_alerts', [])[-5:],  # Last 5 alerts
         }
         if self.session:
             result['stats'] = self.session.get_stats()
@@ -1512,9 +1513,10 @@ class WardrivingEngine:
         """Listen for wardriving data from a USB-connected ESP32 (Piglet/GhostESP).
 
         Rotates through GhostESP commands to maximize data collection:
-        - scanap: WiFi network scanning
-        - blescan -r: BLE device scanning
-        - scansta: Station/client scanning
+        - scanap: WiFi network scanning (primary)
+        - blescan -f: Find Flipper devices
+        - blescan -a: AirTag scanner
+        - capture -skimmer: BLE skimmer detection
         - pineap: PineAP/Evil Twin detection
         """
         logger.info(f"Serial ESP32 listener starting on {self._serial_port}")
@@ -1524,12 +1526,18 @@ class WardrivingEngine:
             logger.error("pyserial not installed - serial listener disabled")
             return
 
-        # Scan cycle: command, duration(s), description
+        # Scan cycle: command, duration(s), mode label
+        # WiFi gets most time since it produces the most data
+        # BLE commands only output when specific devices are found
         scan_cycle = [
-            (b"scanap\r\n", 12, "wifi"),
-            (b"blescan -r\r\n", 8, "ble"),
-            (b"scanap\r\n", 12, "wifi"),
-            (b"scansta\r\n", 6, "stations"),
+            (b"scanap\r\n", 15, "wifi"),
+            (b"blescan -f\r\n", 8, "ble-flipper"),
+            (b"scanap\r\n", 15, "wifi"),
+            (b"blescan -a\r\n", 8, "ble-airtag"),
+            (b"scanap\r\n", 15, "wifi"),
+            (b"capture -skimmer\r\n", 8, "ble-skimmer"),
+            (b"scanap\r\n", 15, "wifi"),
+            (b"pineap\r\n", 10, "pineap"),
         ]
 
         while self._running:
@@ -1547,6 +1555,10 @@ class WardrivingEngine:
                     try:
                         ser.write(b"stop\r\n")
                         time.sleep(0.3)
+                        # Also stop BLE/capture if switching away from those modes
+                        if scan_type.startswith('ble') or scan_type == 'pineap':
+                            ser.write(b"capture -stop\r\n")
+                            time.sleep(0.2)
                         ser.reset_input_buffer()
                         ser.write(cmd)
                         logger.debug(f"GhostESP cmd: {cmd.strip()}")
@@ -1606,58 +1618,139 @@ class WardrivingEngine:
         # Skip GhostESP prompt and status lines
         if line.startswith('ghost-cli>') or line.startswith('Wardrive:') or line.startswith('Registered') or line.startswith('Unsupported'):
             return
-        # Skip empty scan results and help text
-        if line.startswith('WiFi scan') or line.startswith('Started') or line.startswith('Stopped') or line.startswith('Usage:'):
+        # Skip scan status messages, help text, and BLE init lines
+        skip_prefixes = ('WiFi scan', 'Started', 'Stopped', 'Usage:', 'Scanning started',
+                         'BLE initialized', 'BLE scan stopped', 'Skimmer detection',
+                         'Monitoring for', 'Stopping', 'PCAP capture', 'Warning: PCAP',
+                         'BLE stack not ready', 'Error starting')
+        if any(line.startswith(p) for p in skip_prefixes):
             return
 
         # === Pineapple / Evil Twin / Skimmer detection ===
         if 'Pineapple detected' in line or 'POTENTIAL SKIMMER' in line or 'Evil Twin' in line:
             logger.warning(f"[GhostESP ALERT] {line}")
-            if hasattr(self, '_ghost_alerts'):
-                self._ghost_alerts.append({'time': time.time(), 'alert': line})
-            else:
-                self._ghost_alerts = [{'time': time.time(), 'alert': line}]
+            if not hasattr(self, '_ghost_alerts'):
+                self._ghost_alerts = []
+            self._ghost_alerts.append({'time': time.time(), 'alert': line})
+            # Start buffering multi-line alert details
+            self._ghost_alert_buffer = {'type': 'pineap' if 'Pineapple' in line else ('evil_twin' if 'Evil Twin' in line else 'skimmer')}
             return
 
-        # === BLE scan output ===
-        # GhostESP BLE raw output: "Name: DevName, MAC: AA:BB:CC:DD:EE:FF, RSSI: -70"
-        # or flipper format: "Flipper Found! Name: ... MAC: ..."
-        ble_match = re.match(
-            r'(?:.*?)?(?:Name|Device\s*Name):\s*(.+?)(?:,\s*|\s+)MAC(?:\s*Address)?:\s*([0-9a-fA-F:]{17})(?:.*?RSSI:\s*(-?\d+))?',
+        # Buffer continuation lines for alert details (BSSID:, Channel:, Device Name:, MAC Address:, etc.)
+        if hasattr(self, '_ghost_alert_buffer') and self._ghost_alert_buffer:
+            buf = self._ghost_alert_buffer
+            if line.startswith('BSSID:'):
+                buf['bssid'] = line.split(':', 1)[1].strip()
+            elif line.startswith('Channel:'):
+                buf['channel'] = line.split(':', 1)[1].strip()
+            elif line.startswith('RSSI:'):
+                rssi_val = re.search(r'-?\d+', line)
+                buf['rssi'] = int(rssi_val.group()) if rssi_val else -80
+            elif line.startswith('SSIDs'):
+                buf['ssids'] = line.split(':', 1)[1].strip() if ':' in line else ''
+            elif line.startswith('Device Name:'):
+                buf['name'] = line.split(':', 1)[1].strip()
+            elif line.startswith('MAC Address:'):
+                buf['mac'] = line.split(':', 1)[1].strip().upper()
+            elif line.startswith('Reason:') or line.startswith('Please verify'):
+                # End of skimmer alert — flush to DB
+                if buf.get('mac'):
+                    self.session.upsert_bluetooth(
+                        buf['mac'], buf.get('name', ''), buf.get('rssi', -80),
+                        'Skimmer', gps_lat, gps_lon, gps_alt
+                    )
+                    self._ghost_ble_count += 1
+                    logger.warning(f"[GhostESP] Skimmer: {buf.get('name','')} @ {buf['mac']}")
+                self._ghost_alert_buffer = {}
+                return
+            else:
+                # Unrecognized line — flush buffer
+                self._ghost_alert_buffer = {}
+                # Fall through to normal parsing
+            if self._ghost_alert_buffer:
+                return
+
+        # === AirTag detection (multi-line) ===
+        if line.startswith('AirTag found'):
+            self._ghost_airtag_buffer = {}
+            return
+        if hasattr(self, '_ghost_airtag_buffer') and self._ghost_airtag_buffer is not None:
+            if line.startswith('Tag:'):
+                self._ghost_airtag_buffer['tag'] = line.split(':', 1)[1].strip()
+                return
+            elif line.startswith('MAC Address:'):
+                self._ghost_airtag_buffer['mac'] = line.split(':', 1)[1].strip().upper()
+                return
+            elif line.startswith('RSSI:'):
+                rssi_val = re.search(r'-?\d+', line)
+                self._ghost_airtag_buffer['rssi'] = int(rssi_val.group()) if rssi_val else -80
+                # Flush AirTag to DB
+                mac = self._ghost_airtag_buffer.get('mac', '')
+                if mac:
+                    self.session.upsert_bluetooth(
+                        mac, f"AirTag #{self._ghost_airtag_buffer.get('tag', '?')}",
+                        self._ghost_airtag_buffer.get('rssi', -80),
+                        'AirTag', gps_lat, gps_lon, gps_alt
+                    )
+                    self._ghost_ble_count += 1
+                    logger.info(f"[GhostESP] AirTag found: {mac}")
+                self._ghost_airtag_buffer = None
+                return
+            elif line.startswith('Payload'):
+                return  # Skip payload data line
+            else:
+                self._ghost_airtag_buffer = None
+
+        # === Flipper detection ===
+        # Format: "Found White Flipper Device: \nMAC: xx:xx:xx:xx:xx:xx, \nName: xxx, \nRSSI: -70"
+        flipper_match = re.match(
+            r'Found\s+(White|Black|Transparent)\s+Flipper\s+Device',
             line
         )
-        if not ble_match:
-            # Alternate format: "MAC: xx:xx... Name: ... RSSI: ..."
-            ble_match = re.match(
-                r'MAC(?:\s*Address)?:\s*([0-9a-fA-F:]{17})(?:.*?(?:Name|Device):\s*(.+?))?(?:.*?RSSI:\s*(-?\d+))?',
-                line
-            )
-            if ble_match:
-                mac = ble_match.group(1).upper()
-                name = (ble_match.group(2) or '').strip().rstrip(',')
-                rssi_str = ble_match.group(3)
-                rssi = int(rssi_str) if rssi_str else -80
-                ble_type = 'BLE'
-                if 'Flipper' in line:
-                    ble_type = 'Flipper'
-                elif 'AirTag' in line:
-                    ble_type = 'AirTag'
-                elif 'Skimmer' in line:
-                    ble_type = 'Skimmer'
-                self.session.upsert_bluetooth(mac, name, rssi, ble_type, gps_lat, gps_lon, gps_alt)
-                self._ghost_ble_count += 1
+        if flipper_match:
+            self._ghost_flipper_buffer = {'color': flipper_match.group(1)}
+            return
+        if hasattr(self, '_ghost_flipper_buffer') and self._ghost_flipper_buffer:
+            if line.startswith('MAC:'):
+                self._ghost_flipper_buffer['mac'] = line.split(':', 1)[1].strip().rstrip(',').upper()
                 return
-        elif ble_match:
-            name = ble_match.group(1).strip().rstrip(',')
-            mac = ble_match.group(2).upper()
+            elif line.startswith('Name:'):
+                self._ghost_flipper_buffer['name'] = line.split(':', 1)[1].strip().rstrip(',')
+                return
+            elif line.startswith('RSSI:'):
+                rssi_val = re.search(r'-?\d+', line)
+                rssi = int(rssi_val.group()) if rssi_val else -80
+                buf = self._ghost_flipper_buffer
+                mac = buf.get('mac', '')
+                if mac:
+                    name = f"Flipper {buf.get('color', '')} {buf.get('name', '')}".strip()
+                    self.session.upsert_bluetooth(mac, name, rssi, 'Flipper', gps_lat, gps_lon, gps_alt)
+                    self._ghost_ble_count += 1
+                    logger.info(f"[GhostESP] Flipper found: {name} @ {mac}")
+                self._ghost_flipper_buffer = {}
+                return
+            else:
+                self._ghost_flipper_buffer = {}
+
+        # === BLE spam detection ===
+        if 'BLE Spam detected' in line:
+            logger.warning(f"[GhostESP] {line}")
+            if not hasattr(self, '_ghost_alerts'):
+                self._ghost_alerts = []
+            self._ghost_alerts.append({'time': time.time(), 'alert': line})
+            return
+
+        # === Generic BLE line (MAC: ... Name: ... RSSI: ...) ===
+        ble_match = re.match(
+            r'MAC(?:\s*Address)?:\s*([0-9a-fA-F:]{17})(?:.*?(?:Name|Device):\s*(.+?))?(?:.*?RSSI:\s*(-?\d+))?',
+            line
+        )
+        if ble_match:
+            mac = ble_match.group(1).upper()
+            name = (ble_match.group(2) or '').strip().rstrip(',')
             rssi_str = ble_match.group(3)
             rssi = int(rssi_str) if rssi_str else -80
-            ble_type = 'BLE'
-            if 'Flipper' in line:
-                ble_type = 'Flipper'
-            elif 'AirTag' in line:
-                ble_type = 'AirTag'
-            self.session.upsert_bluetooth(mac, name, rssi, ble_type, gps_lat, gps_lon, gps_alt)
+            self.session.upsert_bluetooth(mac, name, rssi, 'BLE', gps_lat, gps_lon, gps_alt)
             self._ghost_ble_count += 1
             return
 

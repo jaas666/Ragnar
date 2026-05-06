@@ -14773,10 +14773,23 @@ function updateWardrivingUI(status) {
             // Show current scan mode and BLE count
             const modeEl = document.getElementById('wd-ghost-mode');
             if (modeEl) {
-                const modeLabels = {wifi: 'WiFi', ble: 'BLE', stations: 'Stations'};
+                const modeLabels = {
+                    wifi: 'WiFi', 'ble-flipper': '🐬 Flipper',
+                    'ble-airtag': '🏷️ AirTag', 'ble-skimmer': '💳 Skimmer',
+                    pineap: '🍍 PineAP', ble: 'BLE', stations: 'Stations'
+                };
                 modeEl.textContent = modeLabels[status.ghost_mode] || status.ghost_mode || '';
             }
             updateElement('wd-ghost-ble-count', String(status.ghost_ble_count || 0));
+            // Show alerts
+            const alertEl = document.getElementById('wd-ghost-alerts');
+            if (alertEl && status.ghost_alerts && status.ghost_alerts.length > 0) {
+                const latest = status.ghost_alerts[status.ghost_alerts.length - 1];
+                alertEl.textContent = '⚠️ ' + latest.alert;
+                alertEl.classList.remove('hidden');
+            } else if (alertEl) {
+                alertEl.classList.add('hidden');
+            }
         } else {
             ghostBar.classList.add('hidden');
         }
