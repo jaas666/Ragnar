@@ -233,7 +233,11 @@ class NetworkScanner:
             for ip, metadata in all_hosts.items():
                 mac = metadata.get('mac', '').lower().strip()
                 vendor = metadata.get('vendor', '')
-                
+
+                if self.blacklistcheck and (mac in self.mac_scan_blacklist or ip in self.ip_scan_blacklist):
+                    self.logger.debug(f"Skipping blacklisted host {ip} ({mac}) in ARP scan")
+                    continue
+
                 if mac and mac != '00:00:00:00:00:00':
                     self.db.upsert_host(
                         mac=mac,
@@ -347,8 +351,13 @@ class NetworkScanner:
                     
                     if mac:
                         mac = mac.lower().strip()
+
+                        if self.blacklistcheck and (mac in self.mac_scan_blacklist or host in self.ip_scan_blacklist):
+                            self.logger.debug(f"Skipping blacklisted host {host} ({mac}) in nmap scan")
+                            continue
+
                         ports_str = ','.join(map(str, sorted(data.get('open_ports', []))))
-                        
+
                         self.db.upsert_host(
                             mac=mac,
                             ip=host,
@@ -485,7 +494,11 @@ class NetworkScanner:
                 for ip, data in ping_discovered.items():
                     mac = data['mac'].lower().strip()
                     vendor = data.get('vendor', '')
-                    
+
+                    if self.blacklistcheck and (mac in self.mac_scan_blacklist or ip in self.ip_scan_blacklist):
+                        self.logger.debug(f"Skipping blacklisted host {ip} ({mac}) in ping sweep")
+                        continue
+
                     self.db.upsert_host(
                         mac=mac,
                         ip=ip,
