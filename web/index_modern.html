@@ -3976,6 +3976,38 @@
                                 Ragnar will enter wardriving mode immediately on power-on — ideal for mobile/walk setups.
                             </div>
                         </div>
+
+                        <!-- Import WiGLE CSV Card -->
+                        <div class="glass rounded-lg p-4 wardriving-feature hidden">
+                            <div class="flex items-center justify-between mb-3">
+                                <h4 class="font-medium">Import WiGLE CSV</h4>
+                                <svg class="w-5 h-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+                            </div>
+                            <div class="text-sm text-gray-400 mb-3">
+                                Import data from Piglet, GhostESP, or any WiGLE-format CSV file.
+                            </div>
+                            <div class="flex gap-2 items-center">
+                                <input type="file" id="wd-import-file" accept=".csv" class="text-xs text-gray-300 file:mr-2 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:bg-blue-600 file:text-white file:cursor-pointer">
+                                <button onclick="importWigleCsv()" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-xs transition-colors">Import</button>
+                            </div>
+                            <div id="wd-import-result" class="text-xs mt-2 hidden"></div>
+                        </div>
+
+                        <!-- Serial ESP32 Listener Card -->
+                        <div class="glass rounded-lg p-4 wardriving-feature hidden">
+                            <div class="flex items-center justify-between mb-3">
+                                <h4 class="font-medium">ESP32 Serial (Piglet/GhostESP)</h4>
+                                <span id="wd-serial-status" class="text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-400">Disconnected</span>
+                            </div>
+                            <div class="text-sm text-gray-400 mb-3">
+                                Listen for real-time wardriving data from a USB-connected ESP32 device.
+                            </div>
+                            <div class="flex gap-2 items-center">
+                                <input type="text" id="wd-serial-port" placeholder="/dev/ttyUSB0 or COM3" class="bg-slate-700 text-white text-xs rounded px-2 py-1.5 border border-slate-600 w-44">
+                                <button id="wd-serial-btn" onclick="toggleSerialListener()" class="bg-purple-600 hover:bg-purple-700 text-white px-3 py-1.5 rounded text-xs transition-colors">Connect</button>
+                            </div>
+                            <div id="wd-serial-networks" class="text-xs text-gray-500 mt-2">Networks from ESP32: <span id="wd-serial-count">0</span></div>
+                        </div>
                         
                     </div>
                 </div>

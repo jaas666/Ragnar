@@ -6208,6 +6208,77 @@ def wardriving_gps():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/wardriving/import', methods=['POST'])
+def wardriving_import_csv():
+    """Import a WiGLE CSV file into the current or a new wardriving session."""
+    try:
+        engine = _get_wardriving_engine()
+
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+
+        file = request.files['file']
+        if not file.filename:
+            return jsonify({'error': 'Empty filename'}), 400
+
+        # Validate file extension
+        if not file.filename.lower().endswith('.csv'):
+            return jsonify({'error': 'Only CSV files accepted'}), 400
+
+        import io
+        from wardriving import WardrivingSession
+
+        # Use current session or create a new one for import
+        if engine.session:
+            session = engine.session
+        else:
+            session = WardrivingSession(engine.data_dir)
+
+        stream = io.StringIO(file.read().decode('utf-8', errors='replace'))
+        result = session.import_wigle_csv(stream)
+
+        if not engine.session:
+            session.close()
+
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Wardriving import error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/wardriving/serial', methods=['GET', 'POST'])
+def wardriving_serial():
+    """Get or set serial ESP32 listener configuration."""
+    try:
+        engine = _get_wardriving_engine()
+
+        if request.method == 'GET':
+            return jsonify({
+                'connected': engine.serial_connected,
+                'port': engine._serial_port or '',
+                'networks': engine.serial_networks
+            })
+
+        data = request.get_json() or {}
+        action = data.get('action', 'start')
+
+        if action == 'stop':
+            result = engine.stop_serial()
+            return jsonify(result)
+        else:
+            port = data.get('port', '')
+            if not port:
+                return jsonify({'error': 'No serial port specified'}), 400
+            # Basic port validation
+            if not re.match(r'^(/dev/tty[A-Za-z0-9]+|COM\d+)$', port):
+                return jsonify({'error': 'Invalid serial port format'}), 400
+            # Save to config
+            get_shared_data().config['wardriving_serial_port'] = port
+            result = engine.start_serial(port)
+            return jsonify(result)
+    except Exception as e:
+        logger.error(f"Wardriving serial error: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/wardriving/track')
 def wardriving_track():
     """Get GPS track for current session (for map display)."""

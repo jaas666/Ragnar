@@ -618,6 +618,170 @@ class WardrivingSession:
         kml_parts.extend(['</Document>', '</kml>'])
         return '\n'.join(kml_parts)
 
+    def import_wigle_csv(self, csv_path_or_stream):
+        """Import a WiGLE-format CSV file into this session.
+
+        Supports Piglet, GhostESP, and standard WiGLE CSV exports.
+        Returns dict with counts of imported records.
+        """
+        imported_wifi = 0
+        imported_bt = 0
+        imported_cell = 0
+        skipped = 0
+
+        try:
+            # Handle both file path and file-like objects
+            if isinstance(csv_path_or_stream, str):
+                fh = open(csv_path_or_stream, 'r', encoding='utf-8', errors='replace')
+            else:
+                fh = csv_path_or_stream
+
+            lines = fh.readlines()
+            if hasattr(csv_path_or_stream, 'close') and isinstance(csv_path_or_stream, str):
+                fh.close()
+
+            # Skip WiGLE metadata line(s) starting with WigleWifi
+            data_lines = []
+            header_line = None
+            for line in lines:
+                stripped = line.strip()
+                if stripped.lower().startswith('wigle') or stripped.lower().startswith('#'):
+                    continue
+                if header_line is None:
+                    header_line = stripped
+                    continue
+                data_lines.append(stripped)
+
+            if not header_line:
+                return {'error': 'No CSV header found', 'imported': 0}
+
+            # Parse header - normalize to lowercase
+            headers = [h.strip().lower() for h in header_line.split(',')]
+
+            # Map common WiGLE column names
+            col_map = {}
+            for i, h in enumerate(headers):
+                if h in ('mac', 'bssid'):
+                    col_map['mac'] = i
+                elif h in ('ssid', 'name'):
+                    col_map['ssid'] = i
+                elif h in ('authmode', 'security', 'encryption'):
+                    col_map['auth'] = i
+                elif h in ('firstseen', 'first_seen', 'time'):
+                    col_map['firstseen'] = i
+                elif h in ('channel',):
+                    col_map['channel'] = i
+                elif h in ('rssi', 'signal', 'level'):
+                    col_map['rssi'] = i
+                elif h in ('currentlatitude', 'latitude', 'lat'):
+                    col_map['lat'] = i
+                elif h in ('currentlongitude', 'longitude', 'lon', 'long'):
+                    col_map['lon'] = i
+                elif h in ('altitudemeters', 'altitude', 'alt'):
+                    col_map['alt'] = i
+                elif h in ('type',):
+                    col_map['type'] = i
+
+            if 'mac' not in col_map:
+                return {'error': 'CSV missing MAC/BSSID column', 'imported': 0}
+
+            for line in data_lines:
+                if not line:
+                    continue
+                # CSV parse (handles quoted fields)
+                try:
+                    row = next(csv.reader([line]))
+                except Exception:
+                    skipped += 1
+                    continue
+
+                if len(row) <= col_map.get('mac', 0):
+                    skipped += 1
+                    continue
+
+                mac = row[col_map['mac']].strip().upper()
+                if not mac or len(mac) < 12:
+                    skipped += 1
+                    continue
+
+                ssid = row[col_map['ssid']].strip() if 'ssid' in col_map and col_map['ssid'] < len(row) else ''
+                auth = row[col_map['auth']].strip() if 'auth' in col_map and col_map['auth'] < len(row) else ''
+                channel = 0
+                if 'channel' in col_map and col_map['channel'] < len(row):
+                    try:
+                        channel = int(row[col_map['channel']])
+                    except (ValueError, TypeError):
+                        pass
+                rssi = -80
+                if 'rssi' in col_map and col_map['rssi'] < len(row):
+                    try:
+                        rssi = int(row[col_map['rssi']])
+                    except (ValueError, TypeError):
+                        pass
+                lat = None
+                lon = None
+                alt = None
+                if 'lat' in col_map and col_map['lat'] < len(row):
+                    try:
+                        lat = float(row[col_map['lat']])
+                    except (ValueError, TypeError):
+                        pass
+                if 'lon' in col_map and col_map['lon'] < len(row):
+                    try:
+                        lon = float(row[col_map['lon']])
+                    except (ValueError, TypeError):
+                        pass
+                if 'alt' in col_map and col_map['alt'] < len(row):
+                    try:
+                        alt = float(row[col_map['alt']])
+                    except (ValueError, TypeError):
+                        pass
+
+                # Determine type
+                record_type = ''
+                if 'type' in col_map and col_map['type'] < len(row):
+                    record_type = row[col_map['type']].strip().upper()
+
+                if record_type in ('BT', 'BLE', 'BLUETOOTH'):
+                    self.upsert_bluetooth(mac, ssid, rssi, '', lat, lon, alt)
+                    imported_bt += 1
+                elif record_type in ('GSM', 'CDMA', 'LTE', 'UMTS', 'CELL', '5G', 'NR'):
+                    self.upsert_cell_tower(
+                        cell_id=mac, tech=record_type, provider=ssid,
+                        signal_dbm=rssi, lat=lat, lon=lon
+                    )
+                    imported_cell += 1
+                else:
+                    # WiFi network
+                    freq = 0
+                    if channel:
+                        if channel <= 14:
+                            freq = 2407 + channel * 5
+                        elif channel >= 36:
+                            freq = 5000 + channel * 5
+                    self.upsert_network(
+                        bssid=mac, ssid=ssid, security=auth,
+                        channel=channel, frequency=freq, rssi=rssi,
+                        lat=lat, lon=lon, alt=alt, speed=None, hdop=None,
+                        interface='import'
+                    )
+                    imported_wifi += 1
+
+        except Exception as e:
+            logger.error(f"WiGLE CSV import error: {e}")
+            return {'error': str(e), 'imported': 0}
+
+        total = imported_wifi + imported_bt + imported_cell
+        logger.info(f"WiGLE CSV imported: {imported_wifi} WiFi, {imported_bt} BT, {imported_cell} Cell, {skipped} skipped")
+        return {
+            'success': True,
+            'imported_wifi': imported_wifi,
+            'imported_bluetooth': imported_bt,
+            'imported_cell': imported_cell,
+            'total_imported': total,
+            'skipped': skipped
+        }
+
     def close(self):
         """Finalize session."""
         self.end_time = time.time()
@@ -660,6 +824,10 @@ class WardrivingEngine:
         self.bt_count = 0
         self.cell_count = 0
         self.device_name = ''
+        self._serial_thread = None
+        self._serial_port = None
+        self.serial_connected = False
+        self.serial_networks = 0
 
     def start(self, interfaces=None, gps_port=None, device_name=None):
         """Start a wardriving session."""
@@ -710,6 +878,13 @@ class WardrivingEngine:
         self._cell_thread = threading.Thread(target=self._cell_scan_loop, daemon=True, name="wardriving-cell")
         self._cell_thread.start()
 
+        # Start serial ESP32 listener (Piglet/GhostESP) if configured
+        serial_port = self.shared_data.config.get('wardriving_serial_port', '')
+        if serial_port:
+            self._serial_port = serial_port
+            self._serial_thread = threading.Thread(target=self._serial_listen_loop, daemon=True, name="wardriving-serial")
+            self._serial_thread.start()
+
         logger.info(f"Wardriving started: interfaces={self.interfaces}, GPS={gps_ok}, device={self.device_name}")
         return {
             'success': True,
@@ -733,6 +908,22 @@ class WardrivingEngine:
         stats = self.session.get_stats() if self.session else {}
         logger.info(f"Wardriving stopped. Networks: {stats.get('total_networks', 0)}")
         return {'success': True, 'stats': stats}
+
+    def start_serial(self, port):
+        """Start serial listener on the given port."""
+        if self._serial_thread and self._serial_thread.is_alive():
+            return {'error': 'Serial already running'}
+        self._serial_port = port
+        self._running_serial = True
+        self._serial_thread = threading.Thread(target=self._serial_listen_loop, daemon=True, name="wardriving-serial")
+        self._serial_thread.start()
+        return {'success': True, 'port': port}
+
+    def stop_serial(self):
+        """Stop the serial listener."""
+        self._serial_port = None
+        self.serial_connected = False
+        return {'success': True}
 
     def is_running(self):
         return self._running
@@ -773,6 +964,9 @@ class WardrivingEngine:
             'bluetooth_count': self.bt_count,
             'cell_count': self.cell_count,
             'device_name': self.device_name,
+            'serial_connected': self.serial_connected,
+            'serial_port': self._serial_port or '',
+            'serial_networks': self.serial_networks,
         }
         if self.session:
             result['stats'] = self.session.get_stats()
@@ -1273,3 +1467,154 @@ class WardrivingEngine:
             logger.debug(f"mmcli 3gpp scan failed: {e}")
 
         return towers
+
+    # ------------------------------------------------------------------
+    # Serial ESP32 listener (Piglet / GhostESP)
+    # ------------------------------------------------------------------
+
+    def _serial_listen_loop(self):
+        """Listen for wardriving data from a USB-connected ESP32 (Piglet/GhostESP).
+
+        Parses two formats:
+        1. WiGLE CSV lines: MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,Lat,Lon,Alt,Acc,Type
+        2. JSON lines: {"mac":"...","ssid":"...","rssi":...,"channel":...,"lat":...,"lon":...}
+        """
+        logger.info(f"Serial ESP32 listener starting on {self._serial_port}")
+        try:
+            import serial as pyserial
+        except ImportError:
+            logger.error("pyserial not installed - serial listener disabled")
+            return
+
+        while self._running:
+            try:
+                ser = pyserial.Serial(self._serial_port, 115200, timeout=2)
+                self.serial_connected = True
+                logger.info(f"Serial connected: {self._serial_port}")
+
+                while self._running:
+                    try:
+                        raw = ser.readline()
+                        if not raw:
+                            continue
+                        line = raw.decode('utf-8', errors='replace').strip()
+                        if not line:
+                            continue
+                        self._parse_serial_line(line)
+                    except Exception as e:
+                        logger.debug(f"Serial read error: {e}")
+                        break
+
+                ser.close()
+            except Exception as e:
+                self.serial_connected = False
+                logger.debug(f"Serial connect failed ({self._serial_port}): {e}")
+                # Retry every 5 seconds
+                for _ in range(5):
+                    if not self._running:
+                        break
+                    time.sleep(1)
+
+        self.serial_connected = False
+        logger.info("Serial ESP32 listener stopped")
+
+    def _parse_serial_line(self, line):
+        """Parse a single line from ESP32 serial output."""
+        if not self.session:
+            return
+
+        pos = self._gps.get_position() if self._gps else None
+        gps_lat = pos['lat'] if pos else None
+        gps_lon = pos['lon'] if pos else None
+        gps_alt = pos.get('alt') if pos else None
+
+        # Try JSON format first (GhostESP style)
+        if line.startswith('{'):
+            try:
+                data = json.loads(line)
+                mac = data.get('mac', data.get('bssid', '')).upper()
+                if not mac or len(mac) < 12:
+                    return
+                ssid = data.get('ssid', data.get('name', ''))
+                rssi = int(data.get('rssi', data.get('signal', -80)))
+                channel = int(data.get('channel', 0))
+                auth = data.get('auth', data.get('security', data.get('encryption', '')))
+                lat = data.get('lat', data.get('latitude', gps_lat))
+                lon = data.get('lon', data.get('longitude', gps_lon))
+                alt = data.get('alt', data.get('altitude', gps_alt))
+                record_type = data.get('type', 'WIFI').upper()
+
+                if lat:
+                    lat = float(lat)
+                if lon:
+                    lon = float(lon)
+                if alt:
+                    alt = float(alt)
+
+                if record_type in ('BT', 'BLE', 'BLUETOOTH'):
+                    self.session.upsert_bluetooth(mac, ssid, rssi, '', lat, lon, alt)
+                else:
+                    freq = 0
+                    if channel:
+                        freq = (2407 + channel * 5) if channel <= 14 else (5000 + channel * 5)
+                    self.session.upsert_network(
+                        bssid=mac, ssid=ssid, security=auth,
+                        channel=channel, frequency=freq, rssi=rssi,
+                        lat=lat, lon=lon, alt=alt, speed=None, hdop=None,
+                        interface='esp32-serial'
+                    )
+                    self.serial_networks += 1
+                return
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # Try WiGLE CSV format (Piglet style)
+        # MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,Lat,Lon,Alt,Acc,Type
+        parts = line.split(',')
+        if len(parts) >= 8:
+            mac = parts[0].strip().upper()
+            # Validate MAC format
+            if re.match(r'^[0-9A-F]{2}(:[0-9A-F]{2}){5}$', mac):
+                ssid = parts[1].strip() if len(parts) > 1 else ''
+                auth = parts[2].strip() if len(parts) > 2 else ''
+                channel = 0
+                try:
+                    channel = int(parts[4].strip()) if len(parts) > 4 else 0
+                except (ValueError, TypeError):
+                    pass
+                rssi = -80
+                try:
+                    rssi = int(parts[5].strip()) if len(parts) > 5 else -80
+                except (ValueError, TypeError):
+                    pass
+                lat = None
+                lon = None
+                alt = None
+                try:
+                    lat = float(parts[6].strip()) if len(parts) > 6 and parts[6].strip() else gps_lat
+                    lon = float(parts[7].strip()) if len(parts) > 7 and parts[7].strip() else gps_lon
+                    alt = float(parts[8].strip()) if len(parts) > 8 and parts[8].strip() else gps_alt
+                except (ValueError, TypeError):
+                    lat = gps_lat
+                    lon = gps_lon
+
+                record_type = parts[10].strip().upper() if len(parts) > 10 else 'WIFI'
+
+                if record_type in ('BT', 'BLE'):
+                    self.session.upsert_bluetooth(mac, ssid, rssi, '', lat, lon, alt)
+                elif record_type in ('GSM', 'CDMA', 'LTE', 'UMTS', 'CELL'):
+                    self.session.upsert_cell_tower(
+                        cell_id=mac, tech=record_type, provider=ssid,
+                        signal_dbm=rssi, lat=lat, lon=lon
+                    )
+                else:
+                    freq = 0
+                    if channel:
+                        freq = (2407 + channel * 5) if channel <= 14 else (5000 + channel * 5)
+                    self.session.upsert_network(
+                        bssid=mac, ssid=ssid, security=auth,
+                        channel=channel, frequency=freq, rssi=rssi,
+                        lat=lat, lon=lon, alt=alt, speed=None, hdop=None,
+                        interface='esp32-serial'
+                    )
+                    self.serial_networks += 1

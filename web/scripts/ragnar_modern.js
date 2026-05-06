@@ -14755,6 +14755,9 @@ function updateWardrivingUI(status) {
     if (status.interfaces && status.interfaces.length > 0) {
         if (ifInfo) ifInfo.textContent = `Interfaces: ${status.interfaces.join(', ')}`;
     }
+
+    // Serial ESP32 status
+    updateSerialStatus(status);
 }
 
 async function saveWardrivingDeviceName(name) {
@@ -14795,6 +14798,88 @@ async function loadWardrivingOnBootState() {
         const cb = document.getElementById('wardriving-on-boot');
         if (cb) cb.checked = !!data.wardriving_on_boot;
     } catch (e) { /* silent */ }
+}
+
+async function importWigleCsv() {
+    const fileInput = document.getElementById('wd-import-file');
+    const resultDiv = document.getElementById('wd-import-result');
+    if (!fileInput || !fileInput.files.length) {
+        if (resultDiv) { resultDiv.textContent = 'Select a CSV file first.'; resultDiv.className = 'text-xs mt-2 text-yellow-400'; }
+        return;
+    }
+    const formData = new FormData();
+    formData.append('file', fileInput.files[0]);
+    try {
+        if (resultDiv) { resultDiv.textContent = 'Importing...'; resultDiv.className = 'text-xs mt-2 text-blue-400'; }
+        const res = await fetch('/api/wardriving/import', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (data.error) {
+            if (resultDiv) { resultDiv.textContent = 'Error: ' + data.error; resultDiv.className = 'text-xs mt-2 text-red-400'; }
+        } else {
+            if (resultDiv) {
+                resultDiv.textContent = `Imported: ${data.imported_wifi || 0} WiFi, ${data.imported_bluetooth || 0} BT, ${data.imported_cell || 0} Cell (${data.skipped || 0} skipped)`;
+                resultDiv.className = 'text-xs mt-2 text-green-400';
+            }
+            loadWardrivingData();
+        }
+    } catch (e) {
+        if (resultDiv) { resultDiv.textContent = 'Import failed: ' + e.message; resultDiv.className = 'text-xs mt-2 text-red-400'; }
+    }
+}
+
+async function toggleSerialListener() {
+    const portInput = document.getElementById('wd-serial-port');
+    const statusEl = document.getElementById('wd-serial-status');
+    const btn = document.getElementById('wd-serial-btn');
+    const isConnected = statusEl && statusEl.textContent === 'Connected';
+
+    try {
+        if (isConnected) {
+            const res = await fetch('/api/wardriving/serial', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'stop'})
+            });
+            const data = await res.json();
+            if (data.success) {
+                if (statusEl) { statusEl.textContent = 'Disconnected'; statusEl.className = 'text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-400'; }
+                if (btn) btn.textContent = 'Connect';
+            }
+        } else {
+            const port = portInput ? portInput.value.trim() : '';
+            if (!port) { alert('Enter a serial port (e.g. /dev/ttyUSB0 or COM3)'); return; }
+            const res = await fetch('/api/wardriving/serial', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'start', port: port})
+            });
+            const data = await res.json();
+            if (data.success) {
+                if (statusEl) { statusEl.textContent = 'Connected'; statusEl.className = 'text-xs px-2 py-0.5 rounded-full bg-green-900 text-green-400'; }
+                if (btn) btn.textContent = 'Disconnect';
+            } else {
+                alert('Serial error: ' + (data.error || 'Unknown'));
+            }
+        }
+    } catch (e) {
+        console.error('[Wardriving] serial toggle error:', e);
+    }
+}
+
+function updateSerialStatus(status) {
+    const statusEl = document.getElementById('wd-serial-status');
+    const btn = document.getElementById('wd-serial-btn');
+    const countEl = document.getElementById('wd-serial-count');
+    const portInput = document.getElementById('wd-serial-port');
+    if (status.serial_connected) {
+        if (statusEl) { statusEl.textContent = 'Connected'; statusEl.className = 'text-xs px-2 py-0.5 rounded-full bg-green-900 text-green-400'; }
+        if (btn) btn.textContent = 'Disconnect';
+        if (portInput && status.serial_port) portInput.value = status.serial_port;
+    } else {
+        if (statusEl) { statusEl.textContent = 'Disconnected'; statusEl.className = 'text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-400'; }
+        if (btn) btn.textContent = 'Connect';
+    }
+    if (countEl) countEl.textContent = status.serial_networks || '0';
 }
 
 function loadWardrivingTableByType() {
