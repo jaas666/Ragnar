@@ -914,7 +914,7 @@ class SharedData:
             self.width = self.config.get('ref_width', profile['ref_width'])
             self.height = self.config.get('ref_height', profile['ref_height'])
             self.screen_reversed = normalize_rotation(self.config.get('screen_reversed', 0))
-            self.web_screen_reversed = self.screen_reversed
+            self.web_screen_reversed = 0
             return
 
         # Non-EPD displays (character LCDs and LED matrices) have no PIL buffer
@@ -927,7 +927,7 @@ class SharedData:
             self.height = profile.get("ref_height",  2)
             self.epd_helper = None
             self.screen_reversed     = normalize_rotation(self.config.get("screen_reversed", 0))
-            self.web_screen_reversed = self.screen_reversed
+            self.web_screen_reversed = 0
             self.apply_display_profile(epd_type_cfg)
             logger.info(
                 f"Non-EPD display '{epd_type_cfg}' configured: {self.width}x{self.height}"
@@ -964,7 +964,7 @@ class SharedData:
             self.epd_helper = EPDHelper(epd_type)
             self.apply_display_profile(epd_type)
             self.screen_reversed = normalize_rotation(self.config.get("screen_reversed", 0))
-            self.web_screen_reversed = self.screen_reversed
+            self.web_screen_reversed = 0
             logger.info(f"EPD type: {epd_type} | size: {self.epd_helper.epd.width}x{self.epd_helper.epd.height} | rotation: {self.screen_reversed}°")
             self.epd_helper.init_full_update()
             self.width, self.height = self.epd_helper.epd.width, self.epd_helper.epd.height
@@ -997,7 +997,7 @@ class SharedData:
                     self.epd_helper.init_full_update()
                     self.width, self.height = self.epd_helper.epd.width, self.epd_helper.epd.height
                     self.screen_reversed = normalize_rotation(self.config.get("screen_reversed", 0))
-                    self.web_screen_reversed = self.screen_reversed
+                    self.web_screen_reversed = 0
                     self.save_config()
                     logger.info(f"EPD {epd_type} initialized via fallback with size: {self.width}x{self.height}")
                     return
@@ -1011,8 +1011,8 @@ class SharedData:
             self.width = self.config.get('ref_width', profile['ref_width'])
             self.height = self.config.get('ref_height', profile['ref_height'])
             self.screen_reversed = normalize_rotation(self.config.get('screen_reversed', 0))
-            self.web_screen_reversed = self.screen_reversed
-            
+            self.web_screen_reversed = 0
+
             # NOTE: Test image code below was used to verify EPD hardware. 
             # Commented out to allow normal Ragnar display to show.
             # Uncomment if you need to test the display again.
