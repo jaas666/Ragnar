@@ -14769,6 +14769,7 @@ function updateWardrivingUI(status) {
             }
             updateElement('wd-ghost-port', status.serial_port || '');
             updateElement('wd-ghost-net-count', String(status.serial_networks || 0));
+            updateElement('wd-ghost-unique', String(status.serial_unique || 0));
         } else {
             ghostBar.classList.add('hidden');
         }

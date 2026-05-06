@@ -992,6 +992,15 @@ class WardrivingEngine:
         }
         if self.session:
             result['stats'] = self.session.get_stats()
+            # Count unique ESP32-only networks (found by esp32-serial but not by wlan)
+            try:
+                with sqlite3.connect(self.session.db_path) as conn:
+                    row = conn.execute(
+                        "SELECT COUNT(DISTINCT bssid) FROM networks WHERE interface='esp32-serial'"
+                    ).fetchone()
+                    result['serial_unique'] = row[0] if row else 0
+            except Exception:
+                result['serial_unique'] = 0
         return result
 
     def get_session_list(self):
@@ -1522,8 +1531,8 @@ class WardrivingEngine:
                     try:
                         raw = ser.readline()
                         if not raw:
-                            # Periodically re-trigger scan every 30s
-                            if time.time() - last_scan_time > 30:
+                            # Periodically re-trigger scan every 15s
+                            if time.time() - last_scan_time > 15:
                                 ser.write(b"scanap\r\n")
                                 last_scan_time = time.time()
                             continue
