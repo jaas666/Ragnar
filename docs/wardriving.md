@@ -4,9 +4,10 @@
 
 Ragnar's wardriving engine collects WiFi networks, BLE devices, cell towers, and GPS positions while driving. Data is stored in SQLite per session and can be exported to WiGLE CSV or KML.
 
-The system has two data sources:
+The system has three data sources:
 - **WiFi adapters (wlan)** — Linux adapters in monitor/managed mode, scanning directly via `iw`
-- **HuginnESP** — ESP32-S3 via USB serial, scanning WiFi + BLE + threat detection
+- **HuginnESP** — ESP32-S3 via USB serial, real-time WiFi + BLE + threat detection
+- **Piglet** — Standalone ESP32 wardriver, imports WiGLE CSV files collected in the field
 
 Everything logged automatically receives GPS coordinates if a GPS receiver is connected.
 
@@ -89,7 +90,7 @@ Total cycle: ~94 seconds.
 
 #### WiFi Networks (JSON, one line per AP)
 ```json
-{"type":"WIFI","mac":"38:E1:F4:F6:79:26","ssid":"Tele2_F67926","rssi":-84,"channel":1,"auth":"WPA2"}
+{"type":"WIFI","mac":"00:00:00:00:00:00","ssid":"wifiSSID","rssi":-84,"channel":1,"auth":"WPA2"}
 ```
 
 #### BLE Devices (JSON, ALL mode, one line per device)
@@ -307,3 +308,68 @@ Ragnar identifies surveillance cameras based on MAC OUI prefixes (manufacturers)
 Axis, Hikvision, Dahua, Vivotek, Bosch, Samsung, Reolink, Amcrest, Foscam, and more.
 
 Cameras are marked in the network list with type and manufacturer.
+
+---
+
+## Piglet Integration
+
+[Piglet](https://github.com/Hamspiced/piglet) is an open-source ESP32-based wardriving platform by Hamspiced. It scans WiFi networks with GPS positioning and logs WiGLE-compatible CSV files to its SD card.
+
+### Supported Piglet Hardware
+
+| Board | Notes |
+|-------|-------|
+| Seeed XIAO ESP32-S3 | 2.4 GHz only |
+| Seeed XIAO ESP32-C5 | 2.4 + 5 GHz |
+| Seeed XIAO ESP32-C6 | 2.4 GHz only |
+| LilyGo T-Dongle C5 | Standalone variant with built-in TFT |
+
+Piglet peripherals: I2C GPS (ATGM336H), SSD1306 OLED, SPI SD card module.
+
+### How It Connects to Ragnar
+
+Piglet is a **standalone field device** — it has no serial command interface. It collects data independently with its own GPS and stores WiGLE CSV files on its SD card.
+
+**Import workflow:**
+
+1. Take Piglet out wardriving — it logs WiFi networks + GPS to SD card
+2. When home, download the CSV files via Piglet's web UI (connects to your WiFi) or remove the SD card
+3. Upload the CSV file(s) to Ragnar via **Import CSV** in the wardriving section (`POST /api/wardriving/import`)
+4. Ragnar imports all networks with GPS coordinates into the active session
+5. View the imported data on the map and in the network table
+
+### What Gets Imported
+
+| Piglet CSV Column | Ragnar Mapping | Status |
+|-------------------|----------------|--------|
+| MAC | `bssid` | ✅ |
+| SSID | `ssid` | ✅ |
+| AuthMode | `security` | ✅ |
+| Channel | `channel` + `frequency` | ✅ |
+| RSSI | `rssi` | ✅ |
+| CurrentLatitude | `lat` | ✅ |
+| CurrentLongitude | `lon` | ✅ |
+| AltitudeMeters | `alt` | ✅ |
+| Type | WiFi / BT routing | ✅ |
+
+The importer handles Piglet's `WigleWifi-1.4` metadata header line automatically.
+
+### Piglet vs HuginnESP
+
+| Feature | HuginnESP | Piglet |
+|---------|-----------|--------|
+| Connection | USB serial (live) | CSV import (offline) |
+| Real-time data | ✅ Continuous | ❌ Post-collection |
+| WiFi scanning | ✅ | ✅ (+ 5 GHz on C5) |
+| BLE scanning | ✅ Filtered + All | ❌ |
+| AirTag detection | ✅ | ❌ |
+| Flipper detection | ✅ | ❌ |
+| Skimmer detection | ✅ | ❌ |
+| Pineapple detection | ✅ | ❌ |
+| Built-in GPS | ❌ (uses Ragnar's) | ✅ Own GPS module |
+| SD card logging | ❌ | ✅ WiGLE CSV |
+| WiGLE direct upload | ❌ | ✅ Via Piglet web UI |
+| ESP-Now mesh | ❌ | ✅ Multi-node wardriving |
+| Display | 480×480 RGB touch | 128×64 OLED |
+
+Both devices complement each other — use HuginnESP for real-time scanning with threat detection, and Piglet for standalone field collection that gets imported later.
