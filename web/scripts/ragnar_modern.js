@@ -15137,7 +15137,11 @@ function renderWardrivingSessions(sessions) {
     container.innerHTML = sessions.map(s => {
         const isActive = _wdSelectedSessionId === s.session_id;
         const activeClass = isActive ? 'ring-2 ring-cyan-500 bg-slate-700/60' : 'bg-slate-800/40';
-        const dateStr = s.start_time ? new Date(s.start_time * 1000).toLocaleString() : s.session_id;
+        let dateStr = s.session_id;
+        if (s.start_time) {
+            const d = new Date(typeof s.start_time === 'number' ? s.start_time * 1000 : s.start_time);
+            if (!isNaN(d.getTime())) dateStr = d.toLocaleString();
+        }
         return `
         <div class="flex flex-wrap items-center justify-between ${activeClass} rounded-lg px-4 py-2 gap-2 cursor-pointer hover:bg-slate-700/50 transition-colors" onclick="selectWardrivingSession('${s.session_id}')">
             <div>
