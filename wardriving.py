@@ -1531,9 +1531,9 @@ class WardrivingEngine:
         # BLE commands only output when specific devices are found
         scan_cycle = [
             (b"scanap\r\n", 15, "wifi"),
-            (b"blescan -f\r\n", 8, "ble-flipper"),
+            (b"blescan -f\r\n", 8, "ble-filtered"),
             (b"scanap\r\n", 15, "wifi"),
-            (b"blescan -a\r\n", 8, "ble-airtag"),
+            (b"blescan -a\r\n", 8, "ble-all"),
             (b"scanap\r\n", 15, "wifi"),
             (b"capture -skimmer\r\n", 8, "ble-skimmer"),
             (b"scanap\r\n", 15, "wifi"),
@@ -1779,6 +1779,7 @@ class WardrivingEngine:
 
                 if record_type in ('BT', 'BLE', 'BLUETOOTH'):
                     self.session.upsert_bluetooth(mac, ssid, rssi, '', lat, lon, alt)
+                    self._esp_ble_count += 1
                 else:
                     freq = 0
                     if channel:
