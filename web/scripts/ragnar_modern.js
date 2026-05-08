@@ -13219,6 +13219,15 @@ async function checkServerCapabilities() {
                     el.classList.add('hidden');
                 }
             });
+            // Config card stays visible so user can re-enable; grey it out when disabled
+            const wdConfigSection = document.getElementById('wardriving-config-section');
+            if (wdConfigSection) {
+                if (wdEnabled) {
+                    wdConfigSection.classList.remove('opacity-50');
+                } else {
+                    wdConfigSection.classList.add('opacity-50');
+                }
+            }
             
             if (serverModeEnabled) {
                 console.log('[ServerMode] ✅ Server mode enabled - unlocking advanced features');
