@@ -961,6 +961,7 @@ class WardrivingEngine:
         self._current_esp_mode = 'wifi'
         self._esp_ble_count = 0
         self._esp_stations = []
+        self._companion_name = ''  # 'Huginn' or 'Piglet'
 
     def start(self, interfaces=None, gps_port=None, device_name=None):
         """Start a wardriving session."""
@@ -1124,6 +1125,7 @@ class WardrivingEngine:
             'serial_connected': self.serial_connected,
             'serial_port': self._serial_port or '',
             'serial_networks': self.serial_networks,
+            'companion_name': self._companion_name,
             'esp_mode': getattr(self, '_current_esp_mode', ''),
             'esp_ble_count': getattr(self, '_esp_ble_count', 0),
             'esp_alerts': getattr(self, '_esp_alerts', [])[-5:],  # Last 5 alerts
@@ -1697,6 +1699,20 @@ class WardrivingEngine:
                 ser = pyserial.Serial(self._serial_port, 115200, timeout=2)
                 self.serial_connected = True
                 logger.info(f"Serial connected: {self._serial_port}")
+
+                # Identify companion: send empty line and check for huginn> prompt
+                try:
+                    ser.reset_input_buffer()
+                    ser.write(b"\r\n")
+                    time.sleep(0.5)
+                    probe = ser.read(ser.in_waiting or 256).decode('utf-8', errors='replace')
+                    if 'huginn>' in probe.lower():
+                        self._companion_name = 'Huginn'
+                    else:
+                        self._companion_name = 'Piglet'
+                    logger.info(f"Companion identified: {self._companion_name}")
+                except Exception:
+                    self._companion_name = 'Piglet'  # Default fallback
 
                 cycle_index = 0
 

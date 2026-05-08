@@ -14801,9 +14801,11 @@ function updateWardrivingUI(status) {
         espBar.classList.remove('hidden');
         const dot = document.getElementById('wd-esp-status-dot');
         const details = document.getElementById('wd-esp-details');
+        const labelEl = document.getElementById('wd-esp-label');
         if (status.serial_connected) {
             if (dot) dot.className = 'w-2 h-2 rounded-full bg-green-500 animate-pulse';
             if (details) details.style.display = '';
+            if (labelEl) labelEl.textContent = status.companion_name || 'Companion';
             updateElement('wd-esp-port', status.serial_port || '');
             updateElement('wd-esp-net-count', String(status.serial_networks || 0));
             updateElement('wd-esp-unique', String(status.serial_unique || 0));
