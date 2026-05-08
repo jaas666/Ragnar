@@ -959,6 +959,9 @@ class WardrivingEngine:
 
         # Start GPS
         from gps_manager import GPSManager
+        # Treat "auto" or empty string as None to trigger auto-detection
+        if gps_port and gps_port.lower() == 'auto':
+            gps_port = None
         self._gps = GPSManager(port=gps_port)
         gps_ok = self._gps.start()
         if not gps_ok:
