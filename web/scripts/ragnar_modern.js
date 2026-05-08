@@ -10141,8 +10141,7 @@ function displayConfigForm(config) {
         'General': ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck'],
         'Network': ['network_max_failed_pings'],
         'Timing': ['startup_delay', 'web_delay', 'screen_delay', 'scan_interval'],
-        'Display': ['epd_type', 'screen_reversed', 'spi_clock_mhz', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness'],
-        'Wardriving': ['wardriving_enabled', 'wardriving_scan_interval', 'wardriving_gps_port', 'wardriving_gps_baudrate', 'wardriving_auto_export']
+        'Display': ['epd_type', 'screen_reversed', 'spi_clock_mhz', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness']
     };
     
     const knownBooleans = ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck', 'wardriving_enabled', 'wardriving_display', 'wardriving_auto_export'];
@@ -10395,6 +10394,34 @@ function displayConfigForm(config) {
 
     const attacksEnabled = config.hasOwnProperty('enable_attacks') ? Boolean(config.enable_attacks) : true;
     updateAttackWarningBanner(attacksEnabled);
+
+    // Render wardriving config settings into the dedicated Wardriving section slot
+    const wdSlot = document.getElementById('wardriving-config-slot');
+    if (wdSlot) {
+        const wdKeys = ['wardriving_enabled', 'wardriving_scan_interval', 'wardriving_gps_port', 'wardriving_gps_baudrate', 'wardriving_auto_export'];
+        let wdHtml = '<form id="wardriving-config-form" class="bg-slate-800 bg-opacity-50 rounded-lg p-4 mt-4"><h4 class="text-md font-bold mb-4 text-gray-300">Settings</h4><div class="grid grid-cols-1 md:grid-cols-2 gap-4">';
+        wdKeys.forEach(key => {
+            const hasKey = Object.prototype.hasOwnProperty.call(config, key);
+            let value = config[key];
+            if (!hasKey && knownBooleans.includes(key)) value = true;
+            if (!hasKey && alwaysShowKeys.has(key)) value = fallbackValues[key];
+            if (hasKey || knownBooleans.includes(key) || alwaysShowKeys.has(key)) {
+                const label = getConfigLabel(key);
+                const description = escapeHtml(getConfigDescription(key));
+                if (typeof value === 'boolean') {
+                    wdHtml += `<label class="flex items-center space-x-3 p-3 rounded-lg hover:bg-slate-700 hover:bg-opacity-50 transition-colors cursor-pointer"><input type="checkbox" name="${key}" ${value ? 'checked' : ''} class="w-5 h-5 rounded bg-slate-700 border-slate-600 text-Ragnar-500 focus:ring-Ragnar-500"><span class="flex items-center gap-2">${label}<span class="info-icon" tabindex="0" role="button" aria-label="${description}" data-tooltip="${description}">ⓘ</span></span></label>`;
+                } else {
+                    wdHtml += `<div class="space-y-2"><label class="flex items-center gap-2 text-sm text-gray-400">${label}<span class="info-icon" tabindex="0" role="button" aria-label="${description}" data-tooltip="${description}">ⓘ</span></label><input type="text" name="${key}" value="${value ?? ''}" class="w-full px-4 py-2 rounded-lg bg-slate-700 border border-slate-600 focus:border-Ragnar-500 focus:ring-1 focus:ring-Ragnar-500"></div>`;
+                }
+            }
+        });
+        wdHtml += '</div><button type="submit" class="w-full mt-4 bg-Ragnar-600 hover:bg-Ragnar-700 text-white font-bold py-2 px-4 rounded-lg transition-colors">Save Wardriving Settings</button></form>';
+        wdSlot.innerHTML = wdHtml;
+        document.getElementById('wardriving-config-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            await saveConfig(e.target);
+        });
+    }
 }
 
 // Handle vulnerability scanning checkbox toggle to enable/disable dependent options
