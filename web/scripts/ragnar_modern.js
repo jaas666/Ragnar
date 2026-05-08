@@ -14831,7 +14831,7 @@ function updateWardrivingUI(status) {
             // No ESP32 connected — show searching message
             if (dot) dot.className = 'w-2 h-2 rounded-full bg-gray-500 animate-pulse';
             if (details) details.style.display = 'none';
-            updateElement('wd-esp-port', 'Searching for a Companion...');
+            updateElement('wd-esp-port', 'Ragnar looking for Huginn or Piglet...');
             const alertEl = document.getElementById('wd-esp-alerts');
             if (alertEl) alertEl.classList.add('hidden');
         }
