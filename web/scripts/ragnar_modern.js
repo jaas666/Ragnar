@@ -14798,14 +14798,12 @@ function updateWardrivingUI(status) {
     // HuginnESP status bar
     const espBar = document.getElementById('wd-esp-bar');
     if (espBar) {
-        if (status.serial_connected || status.serial_port) {
-            espBar.classList.remove('hidden');
-            const dot = document.getElementById('wd-esp-status-dot');
-            if (status.serial_connected) {
-                if (dot) dot.className = 'w-2 h-2 rounded-full bg-green-500 animate-pulse';
-            } else {
-                if (dot) dot.className = 'w-2 h-2 rounded-full bg-yellow-500';
-            }
+        espBar.classList.remove('hidden');
+        const dot = document.getElementById('wd-esp-status-dot');
+        const details = document.getElementById('wd-esp-details');
+        if (status.serial_connected) {
+            if (dot) dot.className = 'w-2 h-2 rounded-full bg-green-500 animate-pulse';
+            if (details) details.style.display = '';
             updateElement('wd-esp-port', status.serial_port || '');
             updateElement('wd-esp-net-count', String(status.serial_networks || 0));
             updateElement('wd-esp-unique', String(status.serial_unique || 0));
@@ -14830,7 +14828,12 @@ function updateWardrivingUI(status) {
                 alertEl.classList.add('hidden');
             }
         } else {
-            espBar.classList.add('hidden');
+            // No ESP32 connected — show searching message
+            if (dot) dot.className = 'w-2 h-2 rounded-full bg-gray-500 animate-pulse';
+            if (details) details.style.display = 'none';
+            updateElement('wd-esp-port', 'Searching for a Companion...');
+            const alertEl = document.getElementById('wd-esp-alerts');
+            if (alertEl) alertEl.classList.add('hidden');
         }
     }
 
