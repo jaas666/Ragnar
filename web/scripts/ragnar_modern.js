@@ -15346,18 +15346,7 @@ let _wdVikingMarker = null;
 let _wdGpsInterval = null;
 let _wdSelectedSessionId = null; // null = current/live session
 
-const _VIKING_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 50" width="40" height="50">
-  <ellipse cx="20" cy="46" rx="8" ry="3" fill="rgba(0,0,0,0.3)"/>
-  <circle cx="20" cy="24" r="10" fill="#f59e0b" stroke="#92400e" stroke-width="2"/>
-  <path d="M10 20 Q8 12 5 8 L12 14 Z" fill="#94a3b8"/>
-  <path d="M30 20 Q32 12 35 8 L28 14 Z" fill="#94a3b8"/>
-  <circle cx="16" cy="22" r="2" fill="#1e293b"/>
-  <circle cx="24" cy="22" r="2" fill="#1e293b"/>
-  <path d="M16 28 Q20 32 24 28" fill="none" stroke="#1e293b" stroke-width="1.5"/>
-  <rect x="12" y="12" width="16" height="6" rx="2" fill="#64748b" stroke="#475569" stroke-width="1"/>
-  <path d="M14 36 L18 44 L22 44 L26 36" fill="#3b82f6" stroke="#1e40af" stroke-width="1"/>
-  <line x1="20" y1="36" x2="20" y2="44" stroke="#1e40af" stroke-width="1"/>
-</svg>`;
+const _VIKING_ICON_HTML = `<img src="/web/images/ragnar.ico" alt="Ragnar" style="width:36px;height:48px;display:block;filter:drop-shadow(0 2px 3px rgba(0,0,0,0.5));">`;
 
 function toggleWardrivingMap() {
     const container = document.getElementById('wd-map-container');
@@ -15417,26 +15406,19 @@ async function _updateVikingPosition() {
         if (gps.has_fix && gps.latitude && gps.longitude) {
             const lat = gps.latitude;
             const lon = gps.longitude;
-            const heading = gps.course || 0;
+            const popup = `<b>Ragnar</b><br>${gps.speed_kmh?.toFixed(1) || 0} km/h`;
             if (!_wdVikingMarker) {
                 const icon = L.divIcon({
-                    html: `<div style="transform:rotate(${heading}deg);width:40px;height:50px;">${_VIKING_SVG}</div>`,
+                    html: _VIKING_ICON_HTML,
                     className: 'wd-viking-icon',
-                    iconSize: [40, 50],
-                    iconAnchor: [20, 46]
+                    iconSize: [36, 48],
+                    iconAnchor: [18, 44]
                 });
                 _wdVikingMarker = L.marker([lat, lon], { icon: icon, zIndexOffset: 1000 }).addTo(_wdMap);
-                _wdVikingMarker.bindPopup(`<b>Ragnar</b><br>${gps.speed_kmh?.toFixed(1) || 0} km/h`);
+                _wdVikingMarker.bindPopup(popup);
             } else {
                 _wdVikingMarker.setLatLng([lat, lon]);
-                const icon = L.divIcon({
-                    html: `<div style="transform:rotate(${heading}deg);width:40px;height:50px;">${_VIKING_SVG}</div>`,
-                    className: 'wd-viking-icon',
-                    iconSize: [40, 50],
-                    iconAnchor: [20, 46]
-                });
-                _wdVikingMarker.setIcon(icon);
-                _wdVikingMarker.setPopupContent(`<b>Ragnar</b><br>${gps.speed_kmh?.toFixed(1) || 0} km/h`);
+                _wdVikingMarker.setPopupContent(popup);
             }
         }
     } catch (e) { /* silent */ }
