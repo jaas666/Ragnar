@@ -1500,11 +1500,61 @@ class WardrivingEngine:
 
         logger.info("Scan loop stopped")
 
+    # All common 2.4 GHz + 5 GHz frequencies for full-channel sweep.
+    # This forces the kernel to listen on every channel instead of only the
+    # associated one, so stationary wardriving discovers all neighbours in
+    # one scan cycle (~2-4 s) instead of trickling in over 30-40 minutes.
+    _ALL_FREQUENCIES = [
+        # 2.4 GHz (channels 1-14)
+        2412, 2417, 2422, 2427, 2432, 2437, 2442, 2447, 2452, 2457, 2462, 2467, 2472,
+        # 5 GHz UNII-1 (36-48)
+        5180, 5200, 5220, 5240,
+        # 5 GHz UNII-2 (52-64) — DFS
+        5260, 5280, 5300, 5320,
+        # 5 GHz UNII-2 Extended (100-144) — DFS
+        5500, 5520, 5540, 5560, 5580, 5600, 5620, 5640, 5660, 5680, 5700, 5720,
+        # 5 GHz UNII-3 (149-165)
+        5745, 5765, 5785, 5805, 5825,
+    ]
+
     def _scan_interface(self, interface):
-        """Scan a single WiFi interface for networks using iw (fastest method)."""
+        """Scan a single WiFi interface for networks using iw.
+
+        Uses an active full-channel sweep (scan trigger with all frequencies)
+        so that every nearby network is discovered in a single pass, even when
+        the interface is associated and stationary.
+        """
         networks = []
 
-        # Method 1: iw scan dump (fastest — reads cached scan results)
+        # Method 1: Active full-channel sweep — trigger scan across ALL
+        # frequencies so the kernel visits every channel.  This is critical
+        # for stationary wardriving where `scan dump` alone only returns
+        # networks on the associated channel + whatever the kernel happened
+        # to scan recently.
+        try:
+            freq_args = []
+            for f in self._ALL_FREQUENCIES:
+                freq_args += ['freq', str(f)]
+            trigger_cmd = ['sudo', 'iw', 'dev', interface, 'scan', 'trigger'] + freq_args
+            trigger = subprocess.run(
+                trigger_cmd,
+                capture_output=True, text=True, timeout=5
+            )
+            if trigger.returncode == 0:
+                # Wait for the full sweep to finish (typically 2-3 s for all channels)
+                time.sleep(2.0)
+                result = subprocess.run(
+                    ['sudo', 'iw', 'dev', interface, 'scan', 'dump'],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    networks = self._parse_iw_scan(result.stdout, interface)
+                    if networks:
+                        return networks
+        except Exception as e:
+            logger.debug(f"iw full-channel sweep failed on {interface}: {e}")
+
+        # Method 2: iw scan dump (reads cached scan results — fast fallback)
         try:
             result = subprocess.run(
                 ['sudo', 'iw', 'dev', interface, 'scan', 'dump'],
@@ -1517,7 +1567,7 @@ class WardrivingEngine:
         except Exception as e:
             logger.debug(f"iw scan dump failed on {interface}: {e}")
 
-        # Method 2: Trigger new scan + dump
+        # Method 3: Trigger simple scan + dump (no freq list)
         try:
             subprocess.run(
                 ['sudo', 'iw', 'dev', interface, 'scan', 'trigger'],
