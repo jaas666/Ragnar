@@ -1039,10 +1039,36 @@ class WardrivingEngine:
         self._cell_thread = threading.Thread(target=self._cell_scan_loop, daemon=True, name="wardriving-cell")
         self._cell_thread.start()
 
-        # Start serial ESP32 listener (Piglet/HuginnESP) - auto-detect or use configured port
+        # Start serial ESP32 listener (Piglet/HuginnESP) - auto-detect or use configured port.
+        # Guards against two real failure modes seen in practice:
+        #   1. Same port as GPS: opening /dev/ttyACM0 twice makes both threads read
+        #      half the bytes each. GPS reports 0 satellites; serial listener parses
+        #      NMEA as garbage and mis-classifies the device as Piglet.
+        #   2. Stale saved port: shared_data.config holds a port from a previous
+        #      session, but the ESP32 has been unplugged. Re-verify via udevadm.
         serial_port = self.shared_data.config.get('wardriving_serial_port', '')
+        gps_port = self._gps.port if self._gps else None
+        if serial_port and serial_port == gps_port:
+            logger.info(f"Serial listener skipped: {serial_port} is already in use by GPS")
+            serial_port = ''
         if not serial_port:
             serial_port = self._detect_esp32_serial()
+        else:
+            # Saved port — confirm an Espressif device is actually still there.
+            verified = self._detect_esp32_serial()
+            if verified and verified != serial_port:
+                logger.info(f"Saved serial_port {serial_port} doesn't match detected {verified}; using detected")
+                serial_port = verified
+            elif not verified:
+                # No Espressif on any port. Try udev directly on the saved port
+                # so we don't false-negative when the saved port still works.
+                if not self._port_is_espressif(serial_port):
+                    logger.info(f"Saved serial_port {serial_port} no longer has an ESP32; skipping serial listener")
+                    serial_port = ''
+        if serial_port and serial_port == gps_port:
+            # Re-check after auto-detection in case it picked up the GPS port.
+            logger.warning(f"Serial detect returned GPS port {serial_port}; skipping serial listener")
+            serial_port = ''
         if serial_port:
             self._serial_port = serial_port
             self.shared_data.config['wardriving_serial_port'] = serial_port
@@ -1078,6 +1104,11 @@ class WardrivingEngine:
         """Start serial listener on the given port."""
         if self._serial_thread and self._serial_thread.is_alive():
             return {'error': 'Serial already running'}
+        # Refuse to open the GPS port — would cause both threads to fight for
+        # the same tty bytes (GPS reports 0 sats, listener mis-classifies).
+        gps_port = self._gps.port if self._gps else None
+        if gps_port and port == gps_port:
+            return {'error': f'Port {port} is already in use by GPS'}
         self._serial_port = port
         self._running_serial = True
         self._serial_thread = threading.Thread(target=self._serial_listen_loop, daemon=True, name="wardriving-serial")
@@ -1237,18 +1268,27 @@ class WardrivingEngine:
         """Auto-detect an Espressif ESP32 on /dev/ttyACM* or /dev/ttyUSB*."""
         import glob
         candidates = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
+        # Don't ever return the GPS port — it'd cause a tty collision.
+        gps_port = self._gps.port if self._gps else None
         for port in sorted(candidates):
-            try:
-                result = subprocess.run(
-                    ['udevadm', 'info', '-a', port],
-                    capture_output=True, text=True, timeout=3
-                )
-                if 'Espressif' in result.stdout or 'espressif' in result.stdout.lower():
-                    logger.info(f"ESP32 detected on {port}")
-                    return port
-            except Exception:
+            if gps_port and port == gps_port:
                 continue
+            if self._port_is_espressif(port):
+                logger.info(f"ESP32 detected on {port}")
+                return port
         return None
+
+    @staticmethod
+    def _port_is_espressif(port):
+        """Return True if udev says the device on `port` is an Espressif USB-serial."""
+        try:
+            result = subprocess.run(
+                ['udevadm', 'info', '-a', port],
+                capture_output=True, text=True, timeout=3
+            )
+            return 'Espressif' in result.stdout or 'espressif' in result.stdout.lower()
+        except Exception:
+            return False
 
     def is_running(self):
         return self._running
