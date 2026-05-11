@@ -15,6 +15,7 @@
 import threading
 import time
 import os
+import re
 import signal
 import glob
 import logging
@@ -812,6 +813,35 @@ class Display:
             y += line_h
         return y
 
+    def _draw_adapter_rows(self, draw, y, rows):
+        """Draw verbose per-adapter rows as one left-aligned line each.
+
+        Unlike _draw_stat_rows the value is rendered next to the label with a
+        fixed indent (no right-align, no 22-char truncation), so longer
+        values like '19 Networks, M RSSI: -63 dBm [2.4]' survive intact. If
+        the combined string still overflows the display width, the line is
+        trimmed character-by-character until it fits.
+        """
+        w = getattr(self, 'render_w', self.shared_data.width)
+        sx = getattr(self, 'render_sx', self.scale_factor_x)
+        sy = getattr(self, 'render_sy', self.scale_factor_y)
+        font = self.shared_data.font_arial9
+        line_h = int(14 * sy)
+        pad_x = int(6 * sx)
+        max_px = w - 2 * pad_x
+        # Match the visual gap between the column-style stat rows (~70 px on a
+        # 250 px e-paper). Tunable: pick the longest label width + small pad.
+        label_col_px = int(50 * sx)
+        for label, value in rows:
+            text = str(value)
+            # Trim from the end until label area + value fit the row width.
+            while text and (font.getlength(text) > max_px - label_col_px):
+                text = text[:-1]
+            draw.text((pad_x, y), label, font=font, fill=0)
+            draw.text((pad_x + label_col_px, y), text, font=font, fill=0)
+            y += line_h
+        return y
+
     def _fetch_network_data(self):
         """Fetch real host data from database."""
         sd = self.shared_data
@@ -1280,13 +1310,47 @@ class Display:
         else:
             gps_str = "No GPS"
 
-        stats = [
+        stats_top = [
             ("WiFi", wifi_str),
             ("Networks", str(st.get('total_networks', 0))),
             ("Open/WEP", f"{st.get('open_networks', 0)}/{st.get('wep_networks', 0)}"),
             ("2.4 GHz", str(st.get('band_2_4ghz', 0))),
             ("5 GHz", str(st.get('band_5ghz', 0))),
             ("6 GHz", str(st.get('band_6ghz', 0))),
+        ]
+
+        # Per-adapter rows. Format requested:
+        #   wlan0    19 Networks, M RSSI: -63 dBm [2.4]
+        #   wlan1    12 Networks, M RSSI: -65 dBm [5]
+        #   wlan2    0 ERR busy -16
+        # Rendered left-aligned (not the right-aligned key/value style) so the
+        # verbose value isn't truncated at 22 chars.
+        details = wd.get('interface_details') or []
+        coverage = (wd.get('coverage') or {}).get('per_interface', {})
+        band_mode = wd.get('band_mode', 'redundant')
+        adapter_rows = []
+        for d in details:
+            name = d.get('name', '?')
+            nets = d.get('networks', 0)
+            err = d.get('scan_error')
+            sweep = d.get('sweep_bands') or []
+            cov = coverage.get(name) or {}
+            median = cov.get('best_rssi_median')
+
+            if err:
+                # Compact "command failed: Device or resource busy (-16)" → "busy -16"
+                short = err.replace('command failed: ', '')
+                short = re.sub(r'\s*\(-?(\d+)\)', r' -\1', short).strip()
+                val = f"{nets} ERR {short}"
+            else:
+                val = f"{nets} Networks"
+                if median:
+                    val += f", M RSSI: {median} dBm"
+                if band_mode == 'split' and sweep:
+                    val += f" [{'/'.join(sweep)}]"
+            adapter_rows.append((name, val))
+
+        stats_bottom = [
             ("Bluetooth", str(st.get('bluetooth_devices', 0))),
             ("Cell", str(st.get('cell_towers', 0))),
             ("Cameras", str(st.get('cameras', 0))),
@@ -1295,10 +1359,16 @@ class Display:
         if gps.get('has_fix'):
             spd = gps.get('speed_kmh')
             spd_str = f"{spd:.1f}km/h" if spd is not None else "-"
-            stats.append(("Sats", str(gps.get('satellites', '-'))))
-            stats.append(("Speed", spd_str))
+            stats_bottom.append(("Sats", str(gps.get('satellites', '-'))))
+            stats_bottom.append(("Speed", spd_str))
 
-        self._draw_stat_rows(draw, y, stats)
+        # Render: top rows (right-aligned key/value), then adapter rows
+        # (left-aligned single line so the long value survives), then bottom rows.
+        y = self._draw_stat_rows(draw, y, stats_top)
+        y = self._draw_adapter_rows(draw, y, adapter_rows)
+        if band_mode and len(details) >= 2:
+            y = self._draw_adapter_rows(draw, y, [("Mode", band_mode)])
+        self._draw_stat_rows(draw, y, stats_bottom)
 
     # ------------------------------------------------------------------
     # GC9A01 round-display renderer
