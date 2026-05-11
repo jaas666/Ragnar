@@ -2081,7 +2081,7 @@ class WardrivingEngine:
         """
         logger.info(f"Serial ESP32 listener starting on {self._serial_port}")
         try:
-            import serial as pyserial  # type: ignore[import-not-found]
+            import serial as pyserial
         except ImportError:
             logger.error("pyserial not installed - serial listener disabled")
             return

@@ -94,7 +94,7 @@ def detect_gps_device(exclude_ports=None):
                 continue
             # Quick probe: try reading a few bytes to see if it sends NMEA
             try:
-                import serial as pyserial  # type: ignore[import-not-found]
+                import serial as pyserial
                 with pyserial.Serial(dev, 9600, timeout=2) as ser:
                     data = ser.read(512).decode('ascii', errors='ignore')
                     if '$GP' in data or '$GN' in data or '$GL' in data:
@@ -143,7 +143,7 @@ class GPSManager:
             return False
 
         try:
-            import serial as pyserial  # type: ignore[import-not-found]
+            import serial as pyserial
             self._serial = pyserial.Serial(self.port, self.baudrate, timeout=1)
             self._running = True
             self.connected = True
@@ -260,7 +260,7 @@ class GPSManager:
 
         # Try to reopen — use cached port first, re-detect only every 30 s
         try:
-            import serial as pyserial  # type: ignore[import-not-found]
+            import serial as pyserial
             now = time.time()
             if self.port:
                 port = self.port
