@@ -14862,6 +14862,7 @@ function _renderWifiAdaptersBar(status) {
     const bandColors = {'2.4GHz': 'text-emerald-400', '5GHz': 'text-purple-400', '6GHz': 'text-pink-400'};
     const cov = status.coverage || {};
     const perIf = cov.per_interface || {};
+    const bandMode = status.band_mode || 'redundant';
 
     // Color RSSI: stronger (less negative) is better. -50 great, -90 unusable.
     const rssiColor = (v) => {
@@ -14874,9 +14875,16 @@ function _renderWifiAdaptersBar(status) {
     const cards = details.map(d => {
         const icon = d.is_usb ? '🔌' : '📡';
         const label = d.manufacturer || d.product || d.driver || d.name;
-        const bands = (d.bands || []).map(b =>
-            `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-700 ${bandColors[b] || 'text-gray-400'}">${b}</span>`
-        ).join(' ');
+        // In split mode highlight the band(s) this adapter actually sweeps;
+        // grey out the bands it could do but isn't assigned to. In redundant
+        // mode every band stays lit (current behavior).
+        const sweepSet = new Set((d.sweep_bands || []).map(b => b + 'GHz'));
+        const bands = (d.bands || []).map(b => {
+            const inSweep = bandMode !== 'split' || sweepSet.has(b);
+            const colorClass = inSweep ? (bandColors[b] || 'text-gray-400') : 'text-gray-600';
+            const bg = inSweep ? 'bg-slate-700' : 'bg-slate-800/60';
+            return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${bg} ${colorClass}">${b}</span>`;
+        }).join(' ');
         const nets = d.networks || 0;
         const c = perIf[d.name];
         let coverageRow = '';
@@ -14946,7 +14954,15 @@ function _renderWifiAdaptersBar(status) {
         </div>`;
     }
 
-    bar.innerHTML = cards + summary;
+    // Header chip showing current band mode (only when meaningful: >=2 adapters)
+    let modeHeader = '';
+    if (details.length >= 2) {
+        const modeLabel = bandMode === 'split'
+            ? '<span class="text-emerald-400 font-bold">Split bands</span> <span class="text-gray-500">(each adapter on its own band — faster cycles, no redundant sweeps)</span>'
+            : '<span class="text-yellow-400 font-bold">Redundant</span> <span class="text-gray-500">(every adapter sweeps every band — more reliable, slower)</span>';
+        modeHeader = `<div class="text-[11px] mb-1">Scan mode: ${modeLabel}</div>`;
+    }
+    bar.innerHTML = modeHeader + cards + summary;
 }
 
 async function saveWardrivingDeviceName(name) {

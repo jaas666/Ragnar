@@ -1096,6 +1096,12 @@ class WardrivingEngine:
         self._iface_prepared = set()  # interfaces successfully brought up at least once
         self._iface_last_error = {}  # most informative scan-failure reason per interface
         self._iface_freq_cache = {}  # cached supported-frequency list per interface
+        # Band-splitting: when multiple adapters are present, pin each one to a
+        # subset of bands so adapters don't redundantly sweep the same channels.
+        # 'redundant' (default) = every adapter sweeps every band it supports.
+        # 'split' = round-robin band assignment, one band per adapter.
+        self.band_mode = 'redundant'
+        self._iface_band_assignment = {}  # iface -> set of allowed bands {'2.4','5','6'}
         self.networks_per_scan = 0
         self.total_networks = 0
         self.scans_completed = 0
@@ -1142,6 +1148,16 @@ class WardrivingEngine:
         # interface returns "Network is down" and zero results forever.
         for iface in self.interfaces:
             self._prepare_interface(iface)
+
+        # Compute per-adapter band assignments (only matters when band_mode='split').
+        # Must run AFTER _prepare_interface because freq detection reads iw phy info,
+        # which can fail on a wedged/down interface.
+        self.band_mode = (self.shared_data.config.get('wardriving_band_mode', 'redundant')
+                          or 'redundant').lower()
+        if self.band_mode not in ('redundant', 'split'):
+            self.band_mode = 'redundant'
+        self._iface_freq_cache.clear()  # force re-detection with new assignments
+        self._compute_band_assignments()
 
         # Pre-detect ESP32 companion port BEFORE GPS auto-detection so we can
         # exclude it. This prevents GPS from opening the ESP32's serial port
@@ -1516,6 +1532,10 @@ class WardrivingEngine:
             if err and info.get('networks', 0) == 0:
                 info['scan_error'] = err
             info['current_type'] = self._iface_type(iface)
+            # Bands this adapter is actively sweeping (matters in split mode).
+            assigned = self._iface_band_assignment.get(iface)
+            if assigned:
+                info['sweep_bands'] = sorted(assigned)
         except Exception as e:
             logger.debug(f"Interface info error for {iface}: {e}")
         return info
@@ -1575,6 +1595,7 @@ class WardrivingEngine:
             'esp_mode': getattr(self, '_current_esp_mode', ''),
             'esp_ble_count': getattr(self, '_esp_ble_count', 0),
             'esp_alerts': getattr(self, '_esp_alerts', [])[-5:],  # Last 5 alerts
+            'band_mode': self.band_mode,
         }
         # Interface details (cached 30s — sysfs/udev calls are slow)
         now_if = time.time()
@@ -1837,13 +1858,26 @@ class WardrivingEngine:
             pass
         return ''
 
+    @staticmethod
+    def _freq_to_band(f):
+        """Map a frequency (MHz) to a band label: '2.4', '5', or '6'."""
+        if f < 3000:
+            return '2.4'
+        if f < 5925:
+            return '5'
+        return '6'
+
     def _iface_supported_freqs(self, interface):
         """Frequencies (MHz) from _ALL_FREQUENCIES that this adapter's phy
-        actually supports. Cached — radio capabilities don't change at runtime.
+        actually supports, further filtered by band assignment if in 'split'
+        mode. Cached per-interface.
 
         Critical for single-band adapters: kernel returns -EINVAL on the whole
         scan trigger if any one frequency in the list is unsupported, so a
         2.4 GHz-only radio (e.g. rt2800usb) silently fails the entire sweep.
+        In split mode, additionally restricts the sweep list to the bands
+        this adapter has been assigned, so the two radios stop redundantly
+        scanning the same channels.
         """
         if interface in self._iface_freq_cache:
             return self._iface_freq_cache[interface]
@@ -1864,13 +1898,21 @@ class WardrivingEngine:
             except Exception as e:
                 logger.debug(f"Failed to read supported freqs for {interface}: {e}")
         freqs = [f for f in self._ALL_FREQUENCIES if f in supported] if supported else []
+
+        # Apply band assignment in split mode. Falls through to the full
+        # supported list in redundant mode or when no assignment exists.
+        if self.band_mode == 'split':
+            assigned = self._iface_band_assignment.get(interface)
+            if assigned:
+                freqs = [f for f in freqs if self._freq_to_band(f) in assigned]
+
         self._iface_freq_cache[interface] = freqs
         if freqs:
+            bands_in_sweep = sorted({self._freq_to_band(f) for f in freqs})
+            mode_tag = f"[{self.band_mode}]" if self.band_mode == 'split' else ''
             logger.info(
-                f"Wardriving: {interface} sweep list = {len(freqs)} channels "
-                f"({'2.4' if any(f<3000 for f in freqs) else ''}"
-                f"{'/' if any(f<3000 for f in freqs) and any(f>=4900 for f in freqs) else ''}"
-                f"{'5' if any(f>=4900 for f in freqs) else ''} GHz)"
+                f"Wardriving: {interface} sweep list {mode_tag} = "
+                f"{len(freqs)} channels ({'/'.join(bands_in_sweep)} GHz)"
             )
         else:
             logger.warning(
@@ -1878,6 +1920,73 @@ class WardrivingEngine:
                 f"will let kernel pick channels"
             )
         return freqs
+
+    def _compute_band_assignments(self):
+        """In 'split' mode, assign each interface one band to sweep so adapters
+        don't redundantly scan the same channels.
+
+        Strategy: walk interfaces in detection order, alternating preferred
+        band (2.4, then 5, then 2.4, ...). If an adapter doesn't support the
+        next preferred band, give it whichever band it does support — this
+        keeps single-band adapters useful. After every band has at least one
+        adapter, remaining adapters fall back to their best supported band.
+
+        With wlan0 (2.4+5) + NETGEAR (2.4+5):
+          wlan0   → 2.4 GHz
+          NETGEAR → 5 GHz
+        With wlan0 + NETGEAR + Realtek (2.4-only):
+          wlan0   → 2.4
+          NETGEAR → 5
+          Realtek → 2.4 (redundant 2.4 — only band it supports)
+        """
+        self._iface_band_assignment.clear()
+        if self.band_mode != 'split' or not self.interfaces:
+            return
+
+        # Determine each interface's supported bands (read once, cheap).
+        iface_bands = {}
+        for iface in self.interfaces:
+            phy = self._iface_phy(iface)
+            bands = set()
+            if phy:
+                try:
+                    r = subprocess.run(['iw', 'phy', phy, 'info'],
+                                       capture_output=True, text=True, timeout=5)
+                    if r.returncode == 0:
+                        for line in r.stdout.split('\n'):
+                            if '(disabled)' in line.lower():
+                                continue
+                            m = re.search(r'\*\s*(\d{4,5})\s*MHz', line)
+                            if m:
+                                bands.add(self._freq_to_band(int(m.group(1))))
+                except Exception:
+                    pass
+            iface_bands[iface] = bands
+
+        preferred_order = ['2.4', '5', '6']
+        next_idx = 0
+        for iface in self.interfaces:
+            supported = iface_bands.get(iface) or set()
+            if not supported:
+                self._iface_band_assignment[iface] = set()
+                continue
+            # Find next preferred band this adapter supports
+            chosen = None
+            for offset in range(len(preferred_order)):
+                cand = preferred_order[(next_idx + offset) % len(preferred_order)]
+                if cand in supported:
+                    chosen = cand
+                    break
+            if not chosen:
+                # Shouldn't happen — supported is non-empty so something matches.
+                chosen = sorted(supported)[0]
+            self._iface_band_assignment[iface] = {chosen}
+            next_idx = (preferred_order.index(chosen) + 1) % len(preferred_order)
+
+        logger.info(
+            f"Wardriving: band assignments (split mode) = "
+            f"{ {k: sorted(v) for k, v in self._iface_band_assignment.items()} }"
+        )
 
     def _cleanup_phy_children(self, interface):
         """Delete any monitor/AP child interfaces sharing this iface's phy.
