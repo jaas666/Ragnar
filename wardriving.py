@@ -129,6 +129,49 @@ class WardrivingSession:
             conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_bssid ON networks(bssid)
             """)
+            # Per-interface observation rows — one per (bssid, interface) so we
+            # can compare antenna coverage between adapters. The main `networks`
+            # table stays one-row-per-bssid (canonical, strongest sample); this
+            # sidecar records what each adapter actually saw.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS network_observations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    bssid TEXT NOT NULL,
+                    interface TEXT NOT NULL,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    best_rssi INTEGER DEFAULT -100,
+                    last_rssi INTEGER DEFAULT -100,
+                    scan_count INTEGER DEFAULT 1
+                )
+            """)
+            conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_obs_bssid_iface
+                ON network_observations(bssid, interface)
+            """)
+            # One-shot backfill for sessions created before observations existed:
+            # if the table is empty but networks has rows, seed observations from
+            # the canonical interface-of-record. Coverage stats will be degenerate
+            # on these old sessions (one interface per BSSID) but at least the
+            # per-interface counts won't be silently zero.
+            try:
+                obs_count = conn.execute(
+                    "SELECT COUNT(*) FROM network_observations"
+                ).fetchone()[0]
+                net_count = conn.execute(
+                    "SELECT COUNT(*) FROM networks WHERE interface != ''"
+                ).fetchone()[0]
+                if obs_count == 0 and net_count > 0:
+                    conn.execute("""
+                        INSERT OR IGNORE INTO network_observations
+                            (bssid, interface, first_seen, last_seen,
+                             best_rssi, last_rssi, scan_count)
+                        SELECT bssid, interface, first_seen, last_seen,
+                               best_rssi, rssi, scan_count
+                        FROM networks WHERE interface != ''
+                    """)
+            except Exception as e:
+                logger.debug(f"Observation backfill skipped: {e}")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS bluetooth_devices (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -303,6 +346,34 @@ class WardrivingSession:
                               now, now, rssi, lat, lon, interface, band, is_camera))
                         self.unique_bssids.add(bssid)
                         self.network_count = len(self.unique_bssids)
+
+                    # Per-interface observation row — records what THIS adapter
+                    # actually saw, independent of which adapter "owns" the
+                    # canonical networks row. Used for antenna-coverage stats.
+                    if interface:
+                        obs = conn.execute(
+                            "SELECT best_rssi, scan_count FROM network_observations "
+                            "WHERE bssid = ? AND interface = ?",
+                            (bssid, interface)
+                        ).fetchone()
+                        if obs:
+                            obs_best = obs[0] if obs[0] is not None else -100
+                            obs_count = (obs[1] or 0) + 1
+                            new_best = max(obs_best, rssi)
+                            conn.execute(
+                                "UPDATE network_observations SET "
+                                "last_seen = ?, last_rssi = ?, best_rssi = ?, "
+                                "scan_count = ? WHERE bssid = ? AND interface = ?",
+                                (now, rssi, new_best, obs_count, bssid, interface)
+                            )
+                        else:
+                            conn.execute(
+                                "INSERT INTO network_observations "
+                                "(bssid, interface, first_seen, last_seen, "
+                                "best_rssi, last_rssi, scan_count) "
+                                "VALUES (?, ?, ?, ?, ?, ?, 1)",
+                                (bssid, interface, now, now, rssi, rssi)
+                            )
 
             except Exception as e:
                 logger.error(f"DB upsert error: {e}")
@@ -544,6 +615,68 @@ class WardrivingSession:
             except Exception as e:
                 logger.error(f"Stats error: {e}")
                 return {'error': str(e)}
+
+    def get_coverage_stats(self, interfaces=None):
+        """Antenna-coverage breakdown from network_observations.
+
+        Returns per-interface:
+          unique     — distinct BSSIDs this interface ever saw
+          only_here  — BSSIDs ONLY this interface saw (no other adapter)
+          best_rssi_avg / best_rssi_median — antenna sensitivity proxies
+        Plus a global `overlap` (BSSIDs seen by 2+ adapters).
+
+        `interfaces` filters out non-scanner sources like 'esp32-serial' or
+        'import' so the comparison only includes live radios.
+        """
+        out = {'per_interface': {}, 'overlap': 0}
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # How many adapters saw each BSSID? Used for only-here + overlap.
+                seen_by = {}  # bssid -> set of interfaces
+                cur = conn.execute(
+                    "SELECT bssid, interface FROM network_observations"
+                )
+                for bssid, iface in cur:
+                    seen_by.setdefault(bssid, set()).add(iface)
+
+                relevant = set(interfaces) if interfaces else None
+                # Overlap = BSSIDs seen by 2+ scanner interfaces
+                if relevant:
+                    out['overlap'] = sum(
+                        1 for bs, ifs in seen_by.items()
+                        if len(ifs & relevant) >= 2
+                    )
+                else:
+                    out['overlap'] = sum(1 for ifs in seen_by.values() if len(ifs) >= 2)
+
+                cur = conn.execute(
+                    "SELECT interface, best_rssi FROM network_observations"
+                )
+                per = {}
+                for iface, rssi in cur:
+                    if relevant and iface not in relevant:
+                        continue
+                    per.setdefault(iface, []).append(rssi if rssi is not None else -100)
+
+                for iface, rssis in per.items():
+                    rssis_sorted = sorted(rssis)
+                    n = len(rssis_sorted)
+                    median = rssis_sorted[n // 2] if n else 0
+                    avg = sum(rssis_sorted) / n if n else 0
+                    only = 0
+                    for bs, ifs in seen_by.items():
+                        scanner_ifs = ifs & relevant if relevant else ifs
+                        if scanner_ifs == {iface}:
+                            only += 1
+                    out['per_interface'][iface] = {
+                        'unique': n,
+                        'only_here': only,
+                        'best_rssi_avg': round(avg, 1),
+                        'best_rssi_median': median,
+                    }
+        except Exception as e:
+            logger.debug(f"Coverage stats error: {e}")
+        return out
 
     def get_networks(self, limit=500, offset=0, sort_by='best_rssi', order='DESC'):
         """Get paginated network list."""
@@ -1362,12 +1495,13 @@ class WardrivingEngine:
                     pass
             if not info['bands']:
                 info['bands'] = ['2.4GHz']  # Safe default
-            # Per-interface network count from DB
+            # Per-interface network count from observations (truthful per-adapter
+            # count, independent of which adapter wrote the canonical row last).
             if self.session:
                 try:
                     with sqlite3.connect(self.session.db_path) as conn:
                         row = conn.execute(
-                            "SELECT COUNT(DISTINCT bssid) FROM networks WHERE interface=?",
+                            "SELECT COUNT(*) FROM network_observations WHERE interface=?",
                             (iface,)
                         ).fetchone()
                         info['networks'] = row[0] if row else 0
@@ -1447,13 +1581,19 @@ class WardrivingEngine:
                         with sqlite3.connect(self.session.db_path) as conn:
                             for d in self._iface_cache:
                                 row = conn.execute(
-                                    "SELECT COUNT(DISTINCT bssid) FROM networks WHERE interface=?",
+                                    "SELECT COUNT(*) FROM network_observations WHERE interface=?",
                                     (d['name'],)
                                 ).fetchone()
                                 d['networks'] = row[0] if row else 0
                     except Exception:
                         pass
             result['interface_details'] = self._iface_cache
+            # Antenna-coverage breakdown for live scanner interfaces only.
+            # Excludes import/esp32-serial sources so the comparison is fair.
+            if self.session:
+                result['coverage'] = self.session.get_coverage_stats(
+                    interfaces=self.interfaces
+                )
         else:
             result['interface_details'] = []
         if self.session:
@@ -1580,10 +1720,39 @@ class WardrivingEngine:
                     )
                     self._last_gps_track = time.time()
 
-                # Scan each interface
+                # Scan each interface in parallel — distinct radios can sweep
+                # concurrently. With one adapter this is a no-op; with two it
+                # halves wall-clock cost and gives each adapter the same RF
+                # observation window so antenna comparisons are fair.
                 total_found = 0
-                for iface in self.interfaces:
-                    networks = self._scan_interface(iface)
+                if len(self.interfaces) == 1:
+                    iface = self.interfaces[0]
+                    results = {iface: self._scan_interface(iface)}
+                else:
+                    results = {}
+                    threads = []
+                    results_lock = threading.Lock()
+
+                    def _scan_worker(iface_local):
+                        try:
+                            nets = self._scan_interface(iface_local)
+                        except Exception as e:
+                            logger.error(f"Scan error on {iface_local}: {e}")
+                            nets = []
+                        with results_lock:
+                            results[iface_local] = nets
+
+                    for iface in self.interfaces:
+                        t = threading.Thread(
+                            target=_scan_worker, args=(iface,),
+                            daemon=True, name=f"wardriving-{iface}"
+                        )
+                        t.start()
+                        threads.append(t)
+                    for t in threads:
+                        t.join(timeout=20)
+
+                for iface, networks in results.items():
                     for net in networks:
                         self.session.upsert_network(
                             bssid=net['bssid'],
