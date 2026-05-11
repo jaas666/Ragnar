@@ -90,6 +90,11 @@ _VENDOR_RULES = {
         "vivotek", "hanwha", "bosch security",
         "foscam", "ezviz", "swann", "annke", "trendnet cam",
         "yi technology", "sricam",
+        # LSC Smart Connect (Action store brand, Tuya-based)
+        "lsc smart", "lsc-", "lscsmart",
+        # Additional brands
+        "imou", "uniview", "tiandy", "kedacom", "milesight",
+        "vstarcam", "tenvis", "hicamera",
     ],
     # Smart TVs / streaming sticks
     "smart_tv": [

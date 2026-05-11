@@ -28,13 +28,39 @@ WIGLE_HEADER = [
 _CAMERA_OUI = {
     '00:80:F0', '00:62:6E', 'C0:56:E3', '28:57:BE', 'AC:CC:8E',  # Axis
     '00:0F:7C', 'B0:C5:54', '7C:11:CB', '30:71:B2', '4C:BD:8F',  # ACTi, Hikvision
-    '44:47:CC', '54:C4:15', 'E0:50:8B', 'C0:06:0C',               # Hikvision
+    '44:47:CC', '54:C4:15', 'E0:50:8B', 'C0:06:0C', 'E0:62:90',  # Hikvision
+    '44:19:B6', 'D8:36:7A', 'C4:2F:90', '34:EA:34', '58:03:FB',  # Hikvision
     'A0:BD:1D', '3C:EF:8C', '48:EA:63', 'BC:AD:28', 'DC:B8:08',  # Dahua
+    '08:ED:ED', '34:E6:D7', '90:02:A9', 'EC:39:18',               # Dahua
     '00:30:53', '00:04:7D', '00:E0:8F', '60:38:E0',               # Vivotek, Bosch
     '78:A5:04', '78:B2:13', 'CC:2D:21', '00:18:AE',               # Samsung, TVT
     '00:09:89', '00:12:9B', '00:14:95',                            # Geovision, Arecont
     '00:1A:07', '00:1C:F0', '00:24:B5', '64:16:66',               # Reolink, Amcrest
-    '9C:8E:CD', 'D4:6D:6D', 'EC:71:DB',                            # TP-Link cameras, Foscam
+    '9C:8E:CD', 'D4:6D:6D', 'EC:71:DB',                           # TP-Link cameras, Foscam
+    '1C:69:0D', 'E0:62:90', '00:62:6E',                            # Foscam additional
+    'B4:4B:D0', '48:2C:A0',                                        # Uniview
+    '7C:1E:06',                                                     # Tiandy
+    '18:FB:7B', '7C:DF:A1', 'C8:47:8C',                           # Beken/BK7231 (Tuya — LSC, Imou, cheap cams)
+    '50:02:91', 'D8:1A:D5',                                        # Tuya/LSC additional chipsets
+}
+
+# SSID substrings (lowercase) that indicate a camera access point.
+# Checked case-insensitively against the broadcast SSID.
+_CAMERA_SSID_PATTERNS = {
+    # Major brands
+    'hikvision', 'ezviz', 'reolink', 'dahua', 'imou',
+    'foscam', 'amcrest', 'annke', 'uniview', 'tiandy',
+    'vivotek', 'hanwha', 'kedacom', 'milesight',
+    'vstarcam', 'tenvis', 'sricam', 'hicamera',
+    # LSC Smart Connect (Action store brand, Tuya-based)
+    'lsc-', 'lsc_', 'lscsmart',
+    # TP-Link camera lines
+    'tapo', 'tp-link_tapo', 'tplink_tapo',
+    # Consumer / cloud cameras
+    'wyze', 'arlo', 'blink', 'ring-', 'ring_',
+    # Generic IP camera SSIDs used by ODM firmware
+    'ipcam', 'ipc-', 'ipc_', 'cctv', 'hcvr',
+    'nvr-', 'nvr_', 'dvr-', 'dvr_',
 }
 
 # Encryption mapping
@@ -280,8 +306,11 @@ class WardrivingSession:
         band = '5GHz' if (frequency and int(frequency) > 4900) else '2.4GHz'
         if frequency and int(frequency) > 5925:
             band = '6GHz'
-        # Check if MAC matches known camera OUI
-        is_camera = 1 if bssid and bssid[:8].upper() in _CAMERA_OUI else 0
+        # Camera detection: MAC OUI match OR SSID name pattern match
+        oui_match = bool(bssid and bssid[:8].upper() in _CAMERA_OUI)
+        ssid_lower = (ssid or '').lower()
+        ssid_match = any(p in ssid_lower for p in _CAMERA_SSID_PATTERNS)
+        is_camera = 1 if (oui_match or ssid_match) else 0
 
         with self._lock:
             try:
