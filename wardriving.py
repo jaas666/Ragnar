@@ -959,6 +959,8 @@ class WardrivingEngine:
         self.session = None
         self.scan_interval = 2  # seconds between scans (fast!)
         self.interfaces = []     # WiFi interfaces to use
+        self._iface_zero_scans = {}  # consecutive zero-network scans per interface
+        self._iface_prepared = set()  # interfaces successfully brought up at least once
         self.networks_per_scan = 0
         self.total_networks = 0
         self.scans_completed = 0
@@ -999,6 +1001,12 @@ class WardrivingEngine:
         self.interfaces = interfaces or self._detect_wifi_interfaces()
         if not self.interfaces:
             return {'error': 'No WiFi interfaces found'}
+
+        # Bring each interface up (rfkill unblock + ip link up). USB adapters
+        # like the NETGEAR mt76x2u enumerate as admin-DOWN; iw scan on a DOWN
+        # interface returns "Network is down" and zero results forever.
+        for iface in self.interfaces:
+            self._prepare_interface(iface)
 
         # Pre-detect ESP32 companion port BEFORE GPS auto-detection so we can
         # exclude it. This prevents GPS from opening the ESP32's serial port
@@ -1627,6 +1635,25 @@ class WardrivingEngine:
         5745, 5765, 5785, 5805, 5825,
     ]
 
+    def _prepare_interface(self, interface):
+        """Unblock rfkill and bring the interface admin-up. Idempotent."""
+        try:
+            subprocess.run(['sudo', 'rfkill', 'unblock', 'wifi'],
+                           capture_output=True, timeout=3)
+        except Exception as e:
+            logger.debug(f"rfkill unblock failed: {e}")
+        try:
+            r = subprocess.run(['sudo', 'ip', 'link', 'set', interface, 'up'],
+                               capture_output=True, text=True, timeout=3)
+            if r.returncode == 0:
+                if interface not in self._iface_prepared:
+                    logger.info(f"Wardriving: brought {interface} up")
+                self._iface_prepared.add(interface)
+            else:
+                logger.warning(f"ip link set {interface} up failed: {r.stderr.strip()}")
+        except Exception as e:
+            logger.warning(f"ip link set {interface} up exception: {e}")
+
     def _scan_interface(self, interface):
         """Scan a single WiFi interface for networks using iw.
 
@@ -1634,6 +1661,12 @@ class WardrivingEngine:
         so that every nearby network is discovered in a single pass, even when
         the interface is associated and stationary.
         """
+        # Self-heal: if the previous scan turned up nothing, re-run prepare in
+        # case the interface went DOWN, got soft-blocked, or was hot-plugged
+        # after start(). Cheap (one rfkill + one ip link call) and idempotent.
+        if self._iface_zero_scans.get(interface, 0) > 0 or interface not in self._iface_prepared:
+            self._prepare_interface(interface)
+
         networks = []
 
         # Method 1: Active full-channel sweep — trigger scan across ALL
@@ -1706,6 +1739,19 @@ class WardrivingEngine:
                 networks = self._parse_nmcli_scan(result.stdout)
         except Exception as e:
             logger.debug(f"nmcli scan failed on {interface}: {e}")
+
+        # Track consecutive empty scans so we self-heal and surface real failures
+        # instead of silently returning [] forever.
+        if networks:
+            self._iface_zero_scans[interface] = 0
+        else:
+            n = self._iface_zero_scans.get(interface, 0) + 1
+            self._iface_zero_scans[interface] = n
+            if n == 3 or (n > 3 and n % 10 == 0):
+                logger.warning(
+                    f"Wardriving: {interface} returned 0 networks for {n} consecutive scans "
+                    f"(check 'ip link show {interface}', 'rfkill list', and NetworkManager state)"
+                )
 
         return networks
 
