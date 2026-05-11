@@ -223,6 +223,25 @@
         #map-ai-toggle-track.disabled { opacity: 0.35; cursor: not-allowed; }
         #map-ai-toggle-knob { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; background: #fff; border-radius: 9999px; transition: transform 0.2s; }
         #map-ai-toggle-track.active #map-ai-toggle-knob { transform: translateX(16px); }
+
+        /* Wardriving map fullscreen mode */
+        #wd-map-container.wd-map-fullscreen {
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            margin: 0 !important;
+            padding: 10px;
+            background: #0f172a;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        #wd-map-container.wd-map-fullscreen #wd-map {
+            flex: 1;
+            height: auto !important;
+            min-height: 0;
+        }
+        body.wd-map-fs-open { overflow: hidden; }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
@@ -3827,6 +3846,16 @@
                         <label class="text-xs text-gray-400">Min Signal:</label>
                         <input type="range" id="wd-map-filter-signal" min="-100" max="-30" value="-100" oninput="document.getElementById('wd-map-signal-val').textContent=this.value+' dBm'; applyWardrivingMapFilters()" class="w-24">
                         <span id="wd-map-signal-val" class="text-xs text-gray-300">-100 dBm</span>
+                        <button onclick="toggleWardrivingMapFullscreen()" id="wd-map-fs-btn" title="Toggle fullscreen (Esc to exit)"
+                            class="ml-auto bg-slate-700 hover:bg-slate-600 text-white text-xs rounded px-2 py-1 border border-slate-600 flex items-center gap-1">
+                            <svg id="wd-map-fs-icon-enter" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4h4M20 8V4h-4M4 16v4h4M20 16v4h-4"/>
+                            </svg>
+                            <svg id="wd-map-fs-icon-exit" class="w-3.5 h-3.5 hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 4v4H5M15 4v4h4M9 20v-4H5M15 20v-4h4"/>
+                            </svg>
+                            <span id="wd-map-fs-label">Fullscreen</span>
+                        </button>
                     </div>
                     <div id="wd-map" style="height: 450px; border-radius: 0.75rem; z-index: 1;"></div>
                     <div class="text-xs text-gray-500 mt-1 text-right" id="wd-map-info"></div>
@@ -4798,7 +4827,7 @@
     </div>
 
     <!-- JavaScript -->
-    <script src="/web/scripts/ragnar_modern.js?v=20260511d"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260511e"></script>
 
 </body>
 </html>

@@ -15597,7 +15597,33 @@ function toggleWardrivingMap() {
             clearInterval(_wdGpsInterval);
             _wdGpsInterval = null;
         }
+        if (_wdMapFullscreen) toggleWardrivingMapFullscreen();
     }
+}
+
+let _wdMapFullscreen = false;
+let _wdMapFsEscHandler = null;
+
+function toggleWardrivingMapFullscreen() {
+    const container = document.getElementById('wd-map-container');
+    if (!container || container.classList.contains('hidden')) return;
+    _wdMapFullscreen = !_wdMapFullscreen;
+    container.classList.toggle('wd-map-fullscreen', _wdMapFullscreen);
+    document.body.classList.toggle('wd-map-fs-open', _wdMapFullscreen);
+    const enterIcon = document.getElementById('wd-map-fs-icon-enter');
+    const exitIcon = document.getElementById('wd-map-fs-icon-exit');
+    const label = document.getElementById('wd-map-fs-label');
+    if (enterIcon) enterIcon.classList.toggle('hidden', _wdMapFullscreen);
+    if (exitIcon) exitIcon.classList.toggle('hidden', !_wdMapFullscreen);
+    if (label) label.textContent = _wdMapFullscreen ? 'Exit' : 'Fullscreen';
+    if (_wdMapFullscreen) {
+        _wdMapFsEscHandler = (e) => { if (e.key === 'Escape' && _wdMapFullscreen) toggleWardrivingMapFullscreen(); };
+        document.addEventListener('keydown', _wdMapFsEscHandler);
+    } else if (_wdMapFsEscHandler) {
+        document.removeEventListener('keydown', _wdMapFsEscHandler);
+        _wdMapFsEscHandler = null;
+    }
+    if (_wdMap) setTimeout(() => _wdMap.invalidateSize(), 220);
 }
 
 function _wdSecurityType(sec) {
