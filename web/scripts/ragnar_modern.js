@@ -14673,10 +14673,9 @@ async function loadWardrivingData() {
         loadHuginnConfig();
 
         if (status.running) {
-            // Defensive: clear before setting so rapid tab toggles can't stack
-            // multiple intervals (was causing duplicate /api calls per tick).
-            if (_wardrivingInterval) clearInterval(_wardrivingInterval);
-            _wardrivingInterval = setInterval(refreshWardrivingStatus, 3000);
+            if (!_wardrivingInterval) {
+                _wardrivingInterval = setInterval(refreshWardrivingStatus, 3000);
+            }
             await loadWardrivingTableByType();
         } else {
             if (_wardrivingInterval) {
@@ -14843,8 +14842,164 @@ function updateWardrivingUI(status) {
         }
     }
 
+    // WiFi Adapters status bar
+    _renderWifiAdaptersBar(status);
+
     // Serial ESP32 config card
     updateSerialStatus(status);
+}
+
+function _renderWifiAdaptersBar(status) {
+    const bar = document.getElementById('wd-adapters-bar');
+    if (!bar) return;
+    const details = status.interface_details;
+    if (!details || details.length === 0) {
+        bar.classList.add('hidden');
+        return;
+    }
+    bar.classList.remove('hidden');
+    const bandColors = {'2.4GHz': 'text-emerald-400', '5GHz': 'text-purple-400', '6GHz': 'text-pink-400'};
+    const cov = status.coverage || {};
+    const perIf = cov.per_interface || {};
+    const bandMode = status.band_mode || 'redundant';
+
+    // Color RSSI: stronger (less negative) is better. -50 great, -90 unusable.
+    const rssiColor = (v) => {
+        if (v == null || v === 0) return 'text-gray-500';
+        if (v >= -55) return 'text-emerald-400';
+        if (v >= -70) return 'text-yellow-400';
+        return 'text-orange-400';
+    };
+
+    const cards = details.map(d => {
+        const icon = d.is_usb ? '🔌' : '📡';
+        const label = d.manufacturer || d.product || d.driver || d.name;
+        // In split mode highlight the band(s) this adapter actually sweeps;
+        // grey out the bands it could do but isn't assigned to. In redundant
+        // mode every band stays lit (current behavior).
+        const sweepSet = new Set((d.sweep_bands || []).map(b => b + 'GHz'));
+        const bands = (d.bands || []).map(b => {
+            const inSweep = bandMode !== 'split' || sweepSet.has(b);
+            const colorClass = inSweep ? (bandColors[b] || 'text-gray-400') : 'text-gray-600';
+            const bg = inSweep ? 'bg-slate-700' : 'bg-slate-800/60';
+            return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${bg} ${colorClass}">${b}</span>`;
+        }).join(' ');
+        const nets = d.networks || 0;
+        const c = perIf[d.name];
+        let coverageRow = '';
+        if (c) {
+            const median = c.best_rssi_median;
+            const avg = c.best_rssi_avg;
+            coverageRow = `
+            <div class="w-full flex items-center gap-3 flex-wrap pl-7 pt-1 text-[11px]">
+                <span class="text-gray-400">Only here:</span>
+                <span class="font-bold ${c.only_here > 0 ? 'text-cyan-300' : 'text-gray-500'}">${c.only_here}</span>
+                <span class="text-gray-600">·</span>
+                <span class="text-gray-400">Median RSSI:</span>
+                <span class="font-bold ${rssiColor(median)}">${median != null ? median + ' dBm' : '—'}</span>
+                <span class="text-gray-600">·</span>
+                <span class="text-gray-400">Avg:</span>
+                <span class="font-bold ${rssiColor(avg)}">${avg != null ? avg + ' dBm' : '—'}</span>
+            </div>`;
+        }
+        let diagRow = '';
+        if (nets === 0 && (d.scan_error || (d.current_type && d.current_type !== 'managed'))) {
+            const bits = [];
+            if (d.current_type && d.current_type !== 'managed') {
+                bits.push(`mode=<span class="text-orange-400 font-bold">${escapeHtml(d.current_type)}</span>`);
+            }
+            if (d.scan_error) {
+                bits.push(`<span class="text-red-400">${escapeHtml(d.scan_error)}</span>`);
+            }
+            diagRow = `
+            <div class="w-full flex items-center gap-2 flex-wrap pl-7 pt-1 text-[11px]">
+                <span class="text-gray-400">⚠ Scan failing:</span>
+                ${bits.join(' <span class="text-gray-600">·</span> ')}
+            </div>`;
+        }
+        return `<div class="bg-slate-800/40 border border-slate-700 rounded-lg px-4 py-2 flex items-center gap-3 flex-wrap">
+            <span class="text-sm">${icon}</span>
+            <span class="text-xs font-bold text-cyan-400">${escapeHtml(d.name)}</span>
+            <span class="text-xs text-gray-400">${escapeHtml(label)}</span>
+            <span class="flex gap-1">${bands}</span>
+            <span class="text-xs text-gray-500">|</span>
+            <span class="text-xs text-gray-400">Networks:</span>
+            <span class="text-xs font-bold text-emerald-400">${nets}</span>
+            ${coverageRow}
+            ${diagRow}
+        </div>`;
+    }).join('');
+
+    // Overlap summary — only meaningful with 2+ scanner interfaces present
+    let summary = '';
+    if (details.length >= 2 && cov.overlap != null) {
+        const ifNames = details.map(d => d.name);
+        const winnerByMedian = ifNames
+            .filter(n => perIf[n] && perIf[n].best_rssi_median)
+            .sort((a, b) => perIf[b].best_rssi_median - perIf[a].best_rssi_median)[0];
+        const winnerByUnique = ifNames
+            .filter(n => perIf[n])
+            .sort((a, b) => perIf[b].unique - perIf[a].unique)[0];
+        const winnerChip = (label, name) => name
+            ? `<span class="text-gray-400">${label}:</span> <span class="font-bold text-cyan-300">${escapeHtml(name)}</span>`
+            : '';
+        summary = `<div class="bg-slate-800/20 border border-slate-700/50 rounded-lg px-4 py-1.5 flex items-center gap-4 flex-wrap text-[11px] mt-1">
+            <span class="text-gray-400">Shared (both saw):</span>
+            <span class="font-bold text-emerald-400">${cov.overlap}</span>
+            <span class="text-gray-600">·</span>
+            ${winnerChip('Best signal', winnerByMedian)}
+            <span class="text-gray-600">·</span>
+            ${winnerChip('Widest coverage', winnerByUnique)}
+        </div>`;
+    }
+
+    // Header chip showing current band mode (only when meaningful: >=2 adapters).
+    // Clickable to flip mode + restart wardriving so the change takes effect.
+    let modeHeader = '';
+    if (details.length >= 2) {
+        const modeLabel = bandMode === 'split'
+            ? '<span class="text-emerald-400 font-bold">Split bands</span> <span class="text-gray-500">(each adapter on its own band — faster cycles, no redundant sweeps)</span>'
+            : '<span class="text-yellow-400 font-bold">Redundant</span> <span class="text-gray-500">(every adapter sweeps every band — more reliable, slower)</span>';
+        const toggleTo = bandMode === 'split' ? 'redundant' : 'split';
+        modeHeader = `<div class="text-[11px] mb-1 flex items-center gap-2">
+            <span>Scan mode: ${modeLabel}</span>
+            <button onclick="toggleWardrivingBandMode('${toggleTo}')" class="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-cyan-300 text-[10px] font-bold border border-slate-600">switch to ${toggleTo}</button>
+        </div>`;
+    }
+    bar.innerHTML = modeHeader + cards + summary;
+}
+
+async function toggleWardrivingBandMode(newMode) {
+    if (!confirm(`Switch wardriving to "${newMode}" mode?\n\nThis stops and restarts the current session — your data is preserved (same DB), but the running session ID will change.`)) return;
+    try {
+        // 1. Persist config so the new mode survives reboots
+        const cfgRes = await fetch('/api/config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({wardriving_band_mode: newMode})
+        });
+        if (!cfgRes.ok) throw new Error('config write failed');
+
+        // 2. Stop the current session — engine reads band_mode at start()
+        await fetch('/api/wardriving/stop', {method: 'POST'});
+
+        // 3. Start a new session that picks up the new mode
+        const startRes = await fetch('/api/wardriving/start', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({})
+        });
+        const data = await startRes.json();
+        if (data.error) {
+            alert('Start failed: ' + data.error);
+            return;
+        }
+        if (typeof addConsoleMessage === 'function') {
+            addConsoleMessage(`Wardriving band mode → ${newMode}`, 'success');
+        }
+    } catch (e) {
+        alert('Band-mode switch failed: ' + e.message);
+    }
 }
 
 async function saveWardrivingDeviceName(name) {
@@ -15433,10 +15588,10 @@ function toggleWardrivingMap() {
         }
         setTimeout(() => { _wdMap.invalidateSize(); }, 200);
         loadWardrivingMapData();
-        // Start live GPS position updates (clear-before-set so toggling the
-        // map open/closed quickly can't stack intervals).
-        if (_wdGpsInterval) clearInterval(_wdGpsInterval);
-        _wdGpsInterval = setInterval(_updateVikingPosition, 3000);
+        // Start live GPS position updates
+        if (!_wdGpsInterval) {
+            _wdGpsInterval = setInterval(_updateVikingPosition, 3000);
+        }
     } else {
         if (_wdGpsInterval) {
             clearInterval(_wdGpsInterval);

@@ -54,37 +54,113 @@ def _nmea_to_decimal(raw, direction):
         return None
 
 
-def detect_gps_device():
-    """Auto-detect USB GPS serial device.
-    
-    Checks common paths:
-    - /dev/ttyUSB* (FTDI/PL2303/CP210x USB-serial adapters)
-    - /dev/ttyACM* (CDC-ACM devices like u-blox)
-    - /dev/serial/by-id/*GPS* or *gps* or *u-blox*
+def _port_is_espressif(port):
+    """Return True iff udev reports an Espressif device on `port`.
+
+    Used to distinguish ESP32 companions (Huginn/Piglet) from other serial
+    devices that share USB-UART bridge chips (CP210x, CH340) — the chip alone
+    isn't enough to identify ESP32, the device-level strings are.
     """
-    # Check by-id symlinks first (most reliable)
+    try:
+        import subprocess
+        r = subprocess.run(
+            ['udevadm', 'info', '-a', port],
+            capture_output=True, text=True, timeout=3
+        )
+        if r.returncode != 0:
+            return False
+        out = r.stdout.lower()
+        return 'espressif' in out
+    except Exception:
+        return False
+
+
+def _probe_nmea(dev, timeout_per_baud=1.5):
+    """Try common GPS baud rates and look for NMEA sentences.
+
+    Many modules ship at 9600 but Garmin and some older receivers default
+    to 4800; u-blox configured for higher data rates can be at 38400 or
+    115200. We try each in order until we see a recognizable NMEA prefix
+    or run out of options.
+
+    Returns True if NMEA was seen at any baud, False otherwise.
+    """
+    try:
+        import serial as pyserial
+    except ImportError:
+        return False
+    for baud in (9600, 4800, 38400, 115200):
+        try:
+            with pyserial.Serial(dev, baud, timeout=timeout_per_baud) as ser:
+                data = ser.read(512).decode('ascii', errors='ignore')
+                if '$GP' in data or '$GN' in data or '$GL' in data:
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def detect_gps_device(exclude_ports=None):
+    """Auto-detect a USB GPS serial device.
+
+    Detection has three stages, in order of confidence:
+      1. by-id symlinks containing GPS keywords (gps, u-blox, nmea, gnss, …).
+      2. by-id symlinks NOT containing known-ESP32 markers — probe for NMEA.
+      3. raw /dev/ttyACM* and /dev/ttyUSB* — probe for NMEA at multiple bauds.
+
+    Earlier versions blanket-excluded any device with `cp210` in the by-id
+    name, but that mis-rejected GPS modules sitting on CP210x USB-UART
+    bridges. We now only exclude ports whose udev info actually identifies
+    them as Espressif, matching what `_port_is_espressif` checks for ESP32
+    detection elsewhere in the system.
+
+    Args:
+        exclude_ports: ports to skip outright (e.g. an ESP32 port already
+                       claimed by the companion serial listener).
+    """
+    exclude = set(exclude_ports or [])
     by_id = '/dev/serial/by-id'
+
+    def _resolve(entry):
+        return os.path.realpath(os.path.join(by_id, entry))
+
+    # Build the exclude set first so by-id keyword matches don't accidentally
+    # return an Espressif device that just happens to have "gnss" in its
+    # product string (rare, but bounded by being explicit).
+    if os.path.isdir(by_id):
+        for entry in os.listdir(by_id):
+            path = _resolve(entry)
+            if _port_is_espressif(path):
+                exclude.add(path)
+
+    # Stage 1: by-id keyword match (most reliable — udev says it's a GPS).
     if os.path.isdir(by_id):
         for entry in os.listdir(by_id):
             lower = entry.lower()
             if any(kw in lower for kw in ('gps', 'u-blox', 'ublox', 'nmea', 'gnss', 'bn-', 'vk-')):
-                path = os.path.realpath(os.path.join(by_id, entry))
-                if os.path.exists(path):
+                path = _resolve(entry)
+                if os.path.exists(path) and path not in exclude:
                     return path
 
-    # Fall back to ttyACM/ttyUSB (prefer ACM for u-blox)
-    for pattern in ('/dev/ttyACM*', '/dev/ttyUSB*'):
-        devices = sorted(glob.glob(pattern))
-        for dev in devices:
-            # Quick probe: try reading a few bytes to see if it sends NMEA
-            try:
-                import serial as pyserial
-                with pyserial.Serial(dev, 9600, timeout=2) as ser:
-                    data = ser.read(512).decode('ascii', errors='ignore')
-                    if '$GP' in data or '$GN' in data or '$GL' in data:
-                        return dev
-            except Exception:
+    # Stage 2: by-id symlinks that aren't ESP32 — try the NMEA probe on each.
+    # Catches modules whose product string doesn't include a GPS keyword
+    # (generic CP210x / CH340 / FTDI bridges with no GPS-specific marking).
+    if os.path.isdir(by_id):
+        for entry in sorted(os.listdir(by_id)):
+            path = _resolve(entry)
+            if path in exclude or not os.path.exists(path):
                 continue
+            if _probe_nmea(path):
+                return path
+
+    # Stage 3: raw ttyACM/ttyUSB — last resort for devices that don't expose
+    # a by-id symlink at all (rare but possible with udev quirks).
+    for pattern in ('/dev/ttyACM*', '/dev/ttyUSB*'):
+        for dev in sorted(glob.glob(pattern)):
+            if dev in exclude:
+                continue
+            if _probe_nmea(dev):
+                return dev
 
     return None
 
@@ -92,9 +168,10 @@ def detect_gps_device():
 class GPSManager:
     """Manages a USB GPS module, providing real-time position data."""
 
-    def __init__(self, port=None, baudrate=9600):
+    def __init__(self, port=None, baudrate=9600, exclude_ports=None):
         self.port = port
         self.baudrate = baudrate
+        self._exclude_ports = set(exclude_ports or [])
         self._serial = None
         self._running = False
         self._thread = None
@@ -119,7 +196,7 @@ class GPSManager:
             return
 
         if not self.port:
-            self.port = detect_gps_device()
+            self.port = detect_gps_device(exclude_ports=self._exclude_ports)
         if not self.port:
             self.error = "No GPS device detected"
             logger.warning(self.error)

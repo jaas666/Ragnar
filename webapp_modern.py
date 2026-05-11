@@ -6251,7 +6251,7 @@ def wardriving_export(session_id):
                 headers={'Content-Disposition': f'attachment; filename=ragnar_wardriving_{session_id}.kml'}
             )
         else:
-            device_name = engine.device_name or get_shared_data().config.get('wardriving_device_name', 'Ragnar')
+            device_name = engine.device_name or shared_data.config.get('wardriving_device_name', 'Ragnar')
             content = session.export_wigle_csv(device_name=device_name)
             return app.response_class(
                 content, mimetype='text/csv',
@@ -6463,7 +6463,6 @@ def wardriving_set_device_name():
     try:
         data = request.get_json(silent=True) or {}
         name = data.get('name', '').strip()[:64]  # Max 64 chars
-        shared_data = get_shared_data()
         shared_data.config['wardriving_device_name'] = name
         shared_data.save_config()
         engine = _get_wardriving_engine()

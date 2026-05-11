@@ -129,6 +129,49 @@ class WardrivingSession:
             conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_bssid ON networks(bssid)
             """)
+            # Per-interface observation rows — one per (bssid, interface) so we
+            # can compare antenna coverage between adapters. The main `networks`
+            # table stays one-row-per-bssid (canonical, strongest sample); this
+            # sidecar records what each adapter actually saw.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS network_observations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    bssid TEXT NOT NULL,
+                    interface TEXT NOT NULL,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    best_rssi INTEGER DEFAULT -100,
+                    last_rssi INTEGER DEFAULT -100,
+                    scan_count INTEGER DEFAULT 1
+                )
+            """)
+            conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_obs_bssid_iface
+                ON network_observations(bssid, interface)
+            """)
+            # One-shot backfill for sessions created before observations existed:
+            # if the table is empty but networks has rows, seed observations from
+            # the canonical interface-of-record. Coverage stats will be degenerate
+            # on these old sessions (one interface per BSSID) but at least the
+            # per-interface counts won't be silently zero.
+            try:
+                obs_count = conn.execute(
+                    "SELECT COUNT(*) FROM network_observations"
+                ).fetchone()[0]
+                net_count = conn.execute(
+                    "SELECT COUNT(*) FROM networks WHERE interface != ''"
+                ).fetchone()[0]
+                if obs_count == 0 and net_count > 0:
+                    conn.execute("""
+                        INSERT OR IGNORE INTO network_observations
+                            (bssid, interface, first_seen, last_seen,
+                             best_rssi, last_rssi, scan_count)
+                        SELECT bssid, interface, first_seen, last_seen,
+                               best_rssi, rssi, scan_count
+                        FROM networks WHERE interface != ''
+                    """)
+            except Exception as e:
+                logger.debug(f"Observation backfill skipped: {e}")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS bluetooth_devices (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -303,6 +346,34 @@ class WardrivingSession:
                               now, now, rssi, lat, lon, interface, band, is_camera))
                         self.unique_bssids.add(bssid)
                         self.network_count = len(self.unique_bssids)
+
+                    # Per-interface observation row — records what THIS adapter
+                    # actually saw, independent of which adapter "owns" the
+                    # canonical networks row. Used for antenna-coverage stats.
+                    if interface:
+                        obs = conn.execute(
+                            "SELECT best_rssi, scan_count FROM network_observations "
+                            "WHERE bssid = ? AND interface = ?",
+                            (bssid, interface)
+                        ).fetchone()
+                        if obs:
+                            obs_best = obs[0] if obs[0] is not None else -100
+                            obs_count = (obs[1] or 0) + 1
+                            new_best = max(obs_best, rssi)
+                            conn.execute(
+                                "UPDATE network_observations SET "
+                                "last_seen = ?, last_rssi = ?, best_rssi = ?, "
+                                "scan_count = ? WHERE bssid = ? AND interface = ?",
+                                (now, rssi, new_best, obs_count, bssid, interface)
+                            )
+                        else:
+                            conn.execute(
+                                "INSERT INTO network_observations "
+                                "(bssid, interface, first_seen, last_seen, "
+                                "best_rssi, last_rssi, scan_count) "
+                                "VALUES (?, ?, ?, ?, ?, ?, 1)",
+                                (bssid, interface, now, now, rssi, rssi)
+                            )
 
             except Exception as e:
                 logger.error(f"DB upsert error: {e}")
@@ -544,6 +615,68 @@ class WardrivingSession:
             except Exception as e:
                 logger.error(f"Stats error: {e}")
                 return {'error': str(e)}
+
+    def get_coverage_stats(self, interfaces=None):
+        """Antenna-coverage breakdown from network_observations.
+
+        Returns per-interface:
+          unique     — distinct BSSIDs this interface ever saw
+          only_here  — BSSIDs ONLY this interface saw (no other adapter)
+          best_rssi_avg / best_rssi_median — antenna sensitivity proxies
+        Plus a global `overlap` (BSSIDs seen by 2+ adapters).
+
+        `interfaces` filters out non-scanner sources like 'esp32-serial' or
+        'import' so the comparison only includes live radios.
+        """
+        out = {'per_interface': {}, 'overlap': 0}
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # How many adapters saw each BSSID? Used for only-here + overlap.
+                seen_by = {}  # bssid -> set of interfaces
+                cur = conn.execute(
+                    "SELECT bssid, interface FROM network_observations"
+                )
+                for bssid, iface in cur:
+                    seen_by.setdefault(bssid, set()).add(iface)
+
+                relevant = set(interfaces) if interfaces else None
+                # Overlap = BSSIDs seen by 2+ scanner interfaces
+                if relevant:
+                    out['overlap'] = sum(
+                        1 for bs, ifs in seen_by.items()
+                        if len(ifs & relevant) >= 2
+                    )
+                else:
+                    out['overlap'] = sum(1 for ifs in seen_by.values() if len(ifs) >= 2)
+
+                cur = conn.execute(
+                    "SELECT interface, best_rssi FROM network_observations"
+                )
+                per = {}
+                for iface, rssi in cur:
+                    if relevant and iface not in relevant:
+                        continue
+                    per.setdefault(iface, []).append(rssi if rssi is not None else -100)
+
+                for iface, rssis in per.items():
+                    rssis_sorted = sorted(rssis)
+                    n = len(rssis_sorted)
+                    median = rssis_sorted[n // 2] if n else 0
+                    avg = sum(rssis_sorted) / n if n else 0
+                    only = 0
+                    for bs, ifs in seen_by.items():
+                        scanner_ifs = ifs & relevant if relevant else ifs
+                        if scanner_ifs == {iface}:
+                            only += 1
+                    out['per_interface'][iface] = {
+                        'unique': n,
+                        'only_here': only,
+                        'best_rssi_avg': round(avg, 1),
+                        'best_rssi_median': median,
+                    }
+        except Exception as e:
+            logger.debug(f"Coverage stats error: {e}")
+        return out
 
     def get_networks(self, limit=500, offset=0, sort_by='best_rssi', order='DESC'):
         """Get paginated network list."""
@@ -959,6 +1092,16 @@ class WardrivingEngine:
         self.session = None
         self.scan_interval = 2  # seconds between scans (fast!)
         self.interfaces = []     # WiFi interfaces to use
+        self._iface_zero_scans = {}  # consecutive zero-network scans per interface
+        self._iface_prepared = set()  # interfaces successfully brought up at least once
+        self._iface_last_error = {}  # most informative scan-failure reason per interface
+        self._iface_freq_cache = {}  # cached supported-frequency list per interface
+        # Band-splitting: when multiple adapters are present, pin each one to a
+        # subset of bands so adapters don't redundantly sweep the same channels.
+        # 'redundant' (default) = every adapter sweeps every band it supports.
+        # 'split' = round-robin band assignment, one band per adapter.
+        self.band_mode = 'redundant'
+        self._iface_band_assignment = {}  # iface -> set of allowed bands {'2.4','5','6'}
         self.networks_per_scan = 0
         self.total_networks = 0
         self.scans_completed = 0
@@ -1000,12 +1143,60 @@ class WardrivingEngine:
         if not self.interfaces:
             return {'error': 'No WiFi interfaces found'}
 
-        # Start GPS
+        # Bring each interface up (rfkill unblock + ip link up). USB adapters
+        # like the NETGEAR mt76x2u enumerate as admin-DOWN; iw scan on a DOWN
+        # interface returns "Network is down" and zero results forever.
+        for iface in self.interfaces:
+            self._prepare_interface(iface)
+
+        # Compute per-adapter band assignments (only matters when band_mode='split').
+        # Must run AFTER _prepare_interface because freq detection reads iw phy info,
+        # which can fail on a wedged/down interface.
+        self.band_mode = (self.shared_data.config.get('wardriving_band_mode', 'redundant')
+                          or 'redundant').lower()
+        if self.band_mode not in ('redundant', 'split'):
+            self.band_mode = 'redundant'
+        self._iface_freq_cache.clear()  # force re-detection with new assignments
+        self._compute_band_assignments()
+
+        # Pre-detect ESP32 companion port BEFORE GPS auto-detection so we can
+        # exclude it. This prevents GPS from opening the ESP32's serial port
+        # and stealing bytes (which causes GPS to report 0 sats and the serial
+        # listener to mis-classify the device).
+        #
+        # IMPORTANT: only trust the saved `wardriving_serial_port` config if
+        # udev STILL says it's an Espressif device. Stale values from prior
+        # sessions (e.g. ttyACM0 was once an ESP32, now it's a GPS) would
+        # otherwise blindly exclude the GPS port and make detection silently
+        # fail. Verifying before adding fixes a bug where GPS auto-detect
+        # returns None despite the device being properly enumerated.
+        saved_serial_port = self.shared_data.config.get('wardriving_serial_port', '')
+        verified_saved = (
+            saved_serial_port
+            and os.path.exists(saved_serial_port)
+            and self._port_is_espressif(saved_serial_port)
+        )
+        if saved_serial_port and not verified_saved:
+            logger.info(
+                f"Saved wardriving_serial_port={saved_serial_port} is no longer an "
+                f"Espressif device; not using it as a GPS exclude"
+            )
+        pre_detected_esp = self._detect_esp32_serial() if not verified_saved else None
+        esp_exclude = set()
+        if verified_saved:
+            esp_exclude.add(saved_serial_port)
+        if pre_detected_esp:
+            esp_exclude.add(pre_detected_esp)
+        # Keep the rest of the start() flow working with the local `serial_port`
+        # variable it expects — only the *verified* value is allowed through.
+        serial_port = saved_serial_port if verified_saved else ''
+
+        # Start GPS (exclude known ESP32 ports from probing)
         from gps_manager import GPSManager
         # Treat "auto" or empty string as None to trigger auto-detection
         if gps_port and gps_port.lower() == 'auto':
             gps_port = None
-        self._gps = GPSManager(port=gps_port)
+        self._gps = GPSManager(port=gps_port, exclude_ports=esp_exclude)
         gps_ok = self._gps.start()
         if not gps_ok:
             logger.warning(f"GPS not available: {self._gps.error}. Wardriving without GPS.")
@@ -1095,6 +1286,17 @@ class WardrivingEngine:
             self.session.close()
         if self._gps:
             self._gps.stop()
+            # Drop the reference so a fresh probe runs next time get_status() or
+            # start() is called. Otherwise the stale GPSManager (with any error
+            # it accumulated during the prior session — e.g. "No GPS device
+            # detected" from a session where the receiver wasn't plugged in
+            # yet) is what callers see, even after the user plugs in the GPS.
+            self._gps = None
+        # Force re-probe on the next status call instead of serving cached
+        # "not detected" from before the user plugged in the receiver.
+        if hasattr(self, '_gps_probe_cache'):
+            self._gps_probe_cache = None
+            self._gps_probe_time = 0
 
         stats = self.session.get_stats() if self.session else {}
         logger.info(f"Wardriving stopped. Networks: {stats.get('total_networks', 0)}")
@@ -1290,20 +1492,112 @@ class WardrivingEngine:
         except Exception:
             return False
 
+    def _get_interface_info(self, iface):
+        """Get detailed info about a WiFi interface (bands, manufacturer, USB/built-in)."""
+        info = {'name': iface, 'bands': [], 'manufacturer': '', 'driver': '', 'is_usb': False, 'networks': 0}
+        try:
+            # Driver
+            driver_link = f'/sys/class/net/{iface}/device/driver'
+            if os.path.islink(driver_link):
+                info['driver'] = os.path.basename(os.readlink(driver_link))
+            # USB check
+            device_path = os.path.realpath(f'/sys/class/net/{iface}/device')
+            info['is_usb'] = '/usb' in device_path
+            # Manufacturer from udev
+            try:
+                result = subprocess.run(
+                    ['udevadm', 'info', '-a', f'/sys/class/net/{iface}'],
+                    capture_output=True, text=True, timeout=3
+                )
+                for line in result.stdout.split('\n'):
+                    line = line.strip()
+                    if line.startswith('ATTRS{manufacturer}=='):
+                        val = line.split('==', 1)[1].strip('"')
+                        if val and val.lower() not in ('linux', 'usb', ''):
+                            info['manufacturer'] = val
+                            break
+                    elif line.startswith('ATTRS{product}==') and not info.get('product'):
+                        val = line.split('==', 1)[1].strip('"')
+                        if val:
+                            info['product'] = val
+            except Exception:
+                pass
+            # Supported bands from iw phy
+            phy_path = f'/sys/class/net/{iface}/phy80211/name'
+            if os.path.exists(phy_path):
+                with open(phy_path) as f:
+                    phy = f.read().strip()
+                try:
+                    result = subprocess.run(
+                        ['iw', 'phy', phy, 'info'],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if result.returncode == 0:
+                        output = result.stdout
+                        if 'Band 1:' in output or '2412 MHz' in output:
+                            info['bands'].append('2.4GHz')
+                        if 'Band 2:' in output or '5180 MHz' in output:
+                            info['bands'].append('5GHz')
+                        if 'Band 4:' in output or '5955 MHz' in output:
+                            info['bands'].append('6GHz')
+                except Exception:
+                    pass
+            if not info['bands']:
+                info['bands'] = ['2.4GHz']  # Safe default
+            # Per-interface network count from observations (truthful per-adapter
+            # count, independent of which adapter wrote the canonical row last).
+            if self.session:
+                try:
+                    with sqlite3.connect(self.session.db_path) as conn:
+                        row = conn.execute(
+                            "SELECT COUNT(*) FROM network_observations WHERE interface=?",
+                            (iface,)
+                        ).fetchone()
+                        info['networks'] = row[0] if row else 0
+                except Exception:
+                    pass
+            # If scans are failing, surface the last kernel error so the UI can
+            # show *why* this adapter is at zero (e.g. EOPNOTSUPP, "Network is
+            # down", "Resource busy"). Empty when scans are succeeding.
+            err = self._iface_last_error.get(iface) if hasattr(self, '_iface_last_error') else None
+            if err and info.get('networks', 0) == 0:
+                info['scan_error'] = err
+            info['current_type'] = self._iface_type(iface)
+            # Bands this adapter is actively sweeping (matters in split mode).
+            assigned = self._iface_band_assignment.get(iface)
+            if assigned:
+                info['sweep_bands'] = sorted(assigned)
+        except Exception as e:
+            logger.debug(f"Interface info error for {iface}: {e}")
+        return info
+
+    def get_interface_details(self):
+        """Get details for all active WiFi interfaces (for UI display)."""
+        details = []
+        for iface in self.interfaces:
+            details.append(self._get_interface_info(iface))
+        return details
+
     def is_running(self):
         return self._running
 
     def get_status(self):
         """Get current wardriving status."""
         # GPS status: use live GPS if running, otherwise probe for device (cached)
-        if self._gps:
+        # Only trust the live GPSManager while wardriving is actually running.
+        # Otherwise its state can be stale ("No GPS device detected" from a
+        # session where the receiver wasn't plugged in yet would persist even
+        # after the user plugs it in). Falling through to the probe path on
+        # the !running case ensures the status reflects current hardware.
+        if self._gps and self._running:
             gps_status = self._gps.get_status()
         else:
             now = time.time()
             if not hasattr(self, '_gps_probe_cache') or now - self._gps_probe_time > 15:
                 from gps_manager import detect_gps_device
                 try:
-                    detected = detect_gps_device()
+                    esp_port = self._serial_port or ''
+                    detected = detect_gps_device(exclude_ports={esp_port} if esp_port else None)
                 except Exception:
                     detected = None
                 self._gps_probe_cache = detected
@@ -1337,7 +1631,37 @@ class WardrivingEngine:
             'esp_mode': getattr(self, '_current_esp_mode', ''),
             'esp_ble_count': getattr(self, '_esp_ble_count', 0),
             'esp_alerts': getattr(self, '_esp_alerts', [])[-5:],  # Last 5 alerts
+            'band_mode': self.band_mode,
         }
+        # Interface details (cached 30s — sysfs/udev calls are slow)
+        now_if = time.time()
+        if self._running and self.interfaces:
+            if not hasattr(self, '_iface_cache') or not self._iface_cache or \
+               now_if - getattr(self, '_iface_cache_time', 0) > 30:
+                self._iface_cache = self.get_interface_details()
+                self._iface_cache_time = now_if
+            else:
+                # Update only the per-interface network counts (cheap DB query)
+                if self.session:
+                    try:
+                        with sqlite3.connect(self.session.db_path) as conn:
+                            for d in self._iface_cache:
+                                row = conn.execute(
+                                    "SELECT COUNT(*) FROM network_observations WHERE interface=?",
+                                    (d['name'],)
+                                ).fetchone()
+                                d['networks'] = row[0] if row else 0
+                    except Exception:
+                        pass
+            result['interface_details'] = self._iface_cache
+            # Antenna-coverage breakdown for live scanner interfaces only.
+            # Excludes import/esp32-serial sources so the comparison is fair.
+            if self.session:
+                result['coverage'] = self.session.get_coverage_stats(
+                    interfaces=self.interfaces
+                )
+        else:
+            result['interface_details'] = []
         if self.session:
             result['stats'] = self.session.get_stats()
             try:
@@ -1462,10 +1786,39 @@ class WardrivingEngine:
                     )
                     self._last_gps_track = time.time()
 
-                # Scan each interface
+                # Scan each interface in parallel — distinct radios can sweep
+                # concurrently. With one adapter this is a no-op; with two it
+                # halves wall-clock cost and gives each adapter the same RF
+                # observation window so antenna comparisons are fair.
                 total_found = 0
-                for iface in self.interfaces:
-                    networks = self._scan_interface(iface)
+                if len(self.interfaces) == 1:
+                    iface = self.interfaces[0]
+                    results = {iface: self._scan_interface(iface)}
+                else:
+                    results = {}
+                    threads = []
+                    results_lock = threading.Lock()
+
+                    def _scan_worker(iface_local):
+                        try:
+                            nets = self._scan_interface(iface_local)
+                        except Exception as e:
+                            logger.error(f"Scan error on {iface_local}: {e}")
+                            nets = []
+                        with results_lock:
+                            results[iface_local] = nets
+
+                    for iface in self.interfaces:
+                        t = threading.Thread(
+                            target=_scan_worker, args=(iface,),
+                            daemon=True, name=f"wardriving-{iface}"
+                        )
+                        t.start()
+                        threads.append(t)
+                    for t in threads:
+                        t.join(timeout=20)
+
+                for iface, networks in results.items():
                     for net in networks:
                         self.session.upsert_network(
                             bssid=net['bssid'],
@@ -1517,6 +1870,297 @@ class WardrivingEngine:
         5745, 5765, 5785, 5805, 5825,
     ]
 
+    def _is_associated(self, interface):
+        """True if the interface is currently associated with an AP as a client.
+        Used to decide whether wardriving can claim it exclusively from NM."""
+        try:
+            r = subprocess.run(['iw', 'dev', interface, 'link'],
+                               capture_output=True, text=True, timeout=3)
+            return r.returncode == 0 and 'Connected to' in r.stdout
+        except Exception:
+            return False
+
+    def _iface_type(self, interface):
+        """Return current iw interface type (managed/monitor/...) or '' on failure."""
+        try:
+            r = subprocess.run(['iw', 'dev', interface, 'info'],
+                               capture_output=True, text=True, timeout=3)
+            if r.returncode == 0:
+                m = re.search(r'^\s*type\s+(\S+)', r.stdout, re.MULTILINE)
+                if m:
+                    return m.group(1).lower()
+        except Exception:
+            pass
+        return ''
+
+    def _iface_phy(self, interface):
+        """Return the phy name (e.g. 'phy0') for an interface, or '' on failure."""
+        try:
+            path = f'/sys/class/net/{interface}/phy80211/name'
+            if os.path.exists(path):
+                with open(path) as f:
+                    return f.read().strip()
+        except Exception:
+            pass
+        return ''
+
+    @staticmethod
+    def _freq_to_band(f):
+        """Map a frequency (MHz) to a band label: '2.4', '5', or '6'."""
+        if f < 3000:
+            return '2.4'
+        if f < 5925:
+            return '5'
+        return '6'
+
+    def _iface_supported_freqs(self, interface):
+        """Frequencies (MHz) from _ALL_FREQUENCIES that this adapter's phy
+        actually supports, further filtered by band assignment if in 'split'
+        mode. Cached per-interface.
+
+        Critical for single-band adapters: kernel returns -EINVAL on the whole
+        scan trigger if any one frequency in the list is unsupported, so a
+        2.4 GHz-only radio (e.g. rt2800usb) silently fails the entire sweep.
+        In split mode, additionally restricts the sweep list to the bands
+        this adapter has been assigned, so the two radios stop redundantly
+        scanning the same channels.
+        """
+        if interface in self._iface_freq_cache:
+            return self._iface_freq_cache[interface]
+        supported = set()
+        phy = self._iface_phy(interface)
+        if phy:
+            try:
+                r = subprocess.run(['iw', 'phy', phy, 'info'],
+                                   capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    # "    * 2412 MHz [1] (20.0 dBm)" — skip "(disabled)" entries
+                    for line in r.stdout.split('\n'):
+                        if '(disabled)' in line.lower():
+                            continue
+                        m = re.search(r'\*\s*(\d{4,5})\s*MHz', line)
+                        if m:
+                            supported.add(int(m.group(1)))
+            except Exception as e:
+                logger.debug(f"Failed to read supported freqs for {interface}: {e}")
+        freqs = [f for f in self._ALL_FREQUENCIES if f in supported] if supported else []
+
+        # Apply band assignment in split mode. Falls through to the full
+        # supported list in redundant mode or when no assignment exists.
+        if self.band_mode == 'split':
+            assigned = self._iface_band_assignment.get(interface)
+            if assigned:
+                freqs = [f for f in freqs if self._freq_to_band(f) in assigned]
+
+        self._iface_freq_cache[interface] = freqs
+        if freqs:
+            bands_in_sweep = sorted({self._freq_to_band(f) for f in freqs})
+            mode_tag = f"[{self.band_mode}]" if self.band_mode == 'split' else ''
+            logger.info(
+                f"Wardriving: {interface} sweep list {mode_tag} = "
+                f"{len(freqs)} channels ({'/'.join(bands_in_sweep)} GHz)"
+            )
+        else:
+            logger.warning(
+                f"Wardriving: {interface} supported-freq detection failed — "
+                f"will let kernel pick channels"
+            )
+        return freqs
+
+    def _compute_band_assignments(self):
+        """In 'split' mode, assign each interface one band to sweep so adapters
+        don't redundantly scan the same channels.
+
+        Strategy: walk interfaces in detection order, alternating preferred
+        band (2.4, then 5, then 2.4, ...). If an adapter doesn't support the
+        next preferred band, give it whichever band it does support — this
+        keeps single-band adapters useful. After every band has at least one
+        adapter, remaining adapters fall back to their best supported band.
+
+        With wlan0 (2.4+5) + NETGEAR (2.4+5):
+          wlan0   → 2.4 GHz
+          NETGEAR → 5 GHz
+        With wlan0 + NETGEAR + Realtek (2.4-only):
+          wlan0   → 2.4
+          NETGEAR → 5
+          Realtek → 2.4 (redundant 2.4 — only band it supports)
+        """
+        self._iface_band_assignment.clear()
+        if self.band_mode != 'split' or not self.interfaces:
+            return
+
+        # Determine each interface's supported bands (read once, cheap).
+        iface_bands = {}
+        for iface in self.interfaces:
+            phy = self._iface_phy(iface)
+            bands = set()
+            if phy:
+                try:
+                    r = subprocess.run(['iw', 'phy', phy, 'info'],
+                                       capture_output=True, text=True, timeout=5)
+                    if r.returncode == 0:
+                        for line in r.stdout.split('\n'):
+                            if '(disabled)' in line.lower():
+                                continue
+                            m = re.search(r'\*\s*(\d{4,5})\s*MHz', line)
+                            if m:
+                                bands.add(self._freq_to_band(int(m.group(1))))
+                except Exception:
+                    pass
+            iface_bands[iface] = bands
+
+        preferred_order = ['2.4', '5', '6']
+        next_idx = 0
+        for iface in self.interfaces:
+            supported = iface_bands.get(iface) or set()
+            if not supported:
+                self._iface_band_assignment[iface] = set()
+                continue
+            # Find next preferred band this adapter supports
+            chosen = None
+            for offset in range(len(preferred_order)):
+                cand = preferred_order[(next_idx + offset) % len(preferred_order)]
+                if cand in supported:
+                    chosen = cand
+                    break
+            if not chosen:
+                # Shouldn't happen — supported is non-empty so something matches.
+                chosen = sorted(supported)[0]
+            self._iface_band_assignment[iface] = {chosen}
+            next_idx = (preferred_order.index(chosen) + 1) % len(preferred_order)
+
+        logger.info(
+            f"Wardriving: band assignments (split mode) = "
+            f"{ {k: sorted(v) for k, v in self._iface_band_assignment.items()} }"
+        )
+
+    def _cleanup_phy_children(self, interface):
+        """Delete any monitor/AP child interfaces sharing this iface's phy.
+
+        airmon-ng / bettercap / kismet create child interfaces (mon0, wlan1mon,
+        …) on the same phy. While the child exists the kernel may refuse scans
+        on the managed parent. Wardriving owns non-WiFi-connected adapters, so
+        clear them.
+        """
+        phy = self._iface_phy(interface)
+        if not phy:
+            return
+        try:
+            r = subprocess.run(['iw', 'dev'], capture_output=True, text=True, timeout=3)
+            if r.returncode != 0:
+                return
+            current_phy = None
+            current_iface = None
+            current_type = None
+            for line in r.stdout.split('\n'):
+                line_strip = line.strip()
+                if line.startswith('phy#'):
+                    current_phy = 'phy' + line_strip[4:]
+                    current_iface = None
+                    current_type = None
+                elif line_strip.startswith('Interface '):
+                    current_iface = line_strip.split(' ', 1)[1].strip()
+                    current_type = None
+                elif line_strip.startswith('type '):
+                    current_type = line_strip.split(' ', 1)[1].strip().lower()
+                    if (current_phy == phy and current_iface and
+                        current_iface != interface and
+                        current_type in ('monitor', 'ap')):
+                        logger.warning(
+                            f"Wardriving: removing leftover {current_type} "
+                            f"child {current_iface} on {phy} (parent {interface})"
+                        )
+                        try:
+                            subprocess.run(['sudo', 'ip', 'link', 'set', current_iface, 'down'],
+                                           capture_output=True, timeout=3)
+                            subprocess.run(['sudo', 'iw', 'dev', current_iface, 'del'],
+                                           capture_output=True, timeout=3)
+                        except Exception as e:
+                            logger.warning(f"Failed to delete {current_iface}: {e}")
+        except Exception as e:
+            logger.debug(f"phy-children cleanup failed for {interface}: {e}")
+
+    def _prepare_interface(self, interface):
+        """Ensure interface is unblocked, free of monitor children, in managed
+        mode, and admin-up.
+
+        Design contract: wardriving owns every wlan adapter that isn't the
+        WiFi-management interface. Anything else (leftover airmon mon0,
+        bettercap monitor child, manual `iw set type monitor`) gets reclaimed.
+        Only pwnagotchi mode — explicitly started by the user — is allowed to
+        flip an adapter back to monitor.
+
+        DELIBERATE: wardriving and AP mode are MUTUALLY EXCLUSIVE by design.
+        If Ragnar enters AP mode (wlan0 type='ap' via hostapd) while wardriving
+        is active, this method will force wlan0 back to 'managed' and the AP
+        will collapse. That is intentional — wardriving needs every radio in
+        scannable state. If you want AP mode, stop wardriving first (or never
+        enable wardriving_on_boot). Do not add an "if type=='ap' then skip"
+        guard here without re-discussing this trade-off.
+        """
+        # rfkill unblock — cheap, idempotent
+        try:
+            subprocess.run(['sudo', 'rfkill', 'unblock', 'wifi'],
+                           capture_output=True, timeout=3)
+        except Exception as e:
+            logger.debug(f"rfkill unblock failed: {e}")
+
+        # Claim non-associated interfaces from NetworkManager so its autoscan
+        # doesn't race our scan trigger (kernel returns -EBUSY when NM has a
+        # scan in flight). Skip the management interface (the one currently
+        # connected to an AP) — we must not touch that or we kill WiFi.
+        if not self._is_associated(interface):
+            try:
+                r = subprocess.run(
+                    ['sudo', 'nmcli', 'dev', 'set', interface, 'managed', 'no'],
+                    capture_output=True, text=True, timeout=3
+                )
+                if r.returncode == 0 and interface not in self._iface_prepared:
+                    logger.info(
+                        f"Wardriving: {interface} marked unmanaged in NetworkManager "
+                        f"(prevents autoscan races)"
+                    )
+            except Exception as e:
+                logger.debug(f"nmcli unmanage on {interface} failed: {e}")
+
+        # Kill any monitor/AP child interfaces on this phy first.
+        self._cleanup_phy_children(interface)
+
+        current_type = self._iface_type(interface)
+
+        # Force managed if (a) we know it's not managed, or (b) we couldn't
+        # read the type at all — the latter usually means the interface is in
+        # a weird state and we want to reset it anyway. The cost of a
+        # redundant down/up on an already-managed iface is ~100 ms.
+        needs_reset = (not current_type) or (current_type != 'managed')
+        if needs_reset:
+            reason = current_type or 'unknown-state'
+            logger.warning(
+                f"Wardriving: {interface} state='{reason}' — forcing managed for scanning"
+            )
+            try:
+                subprocess.run(['sudo', 'ip', 'link', 'set', interface, 'down'],
+                               capture_output=True, timeout=3)
+                r = subprocess.run(['sudo', 'iw', 'dev', interface, 'set', 'type', 'managed'],
+                                   capture_output=True, text=True, timeout=3)
+                if r.returncode != 0:
+                    logger.warning(f"iw set type managed on {interface} failed: {r.stderr.strip()}")
+            except Exception as e:
+                logger.warning(f"forcing managed on {interface} exception: {e}")
+
+        # Always bring it up (cheap no-op if already up)
+        try:
+            r = subprocess.run(['sudo', 'ip', 'link', 'set', interface, 'up'],
+                               capture_output=True, text=True, timeout=3)
+            if r.returncode == 0:
+                if interface not in self._iface_prepared:
+                    logger.info(f"Wardriving: {interface} ready (type=managed, up)")
+                self._iface_prepared.add(interface)
+            else:
+                logger.warning(f"ip link set {interface} up failed: {r.stderr.strip()}")
+        except Exception as e:
+            logger.warning(f"ip link set {interface} up exception: {e}")
+
     def _scan_interface(self, interface):
         """Scan a single WiFi interface for networks using iw.
 
@@ -1524,22 +2168,38 @@ class WardrivingEngine:
         so that every nearby network is discovered in a single pass, even when
         the interface is associated and stationary.
         """
+        # Self-heal: if the previous scan turned up nothing, re-run prepare in
+        # case the interface went DOWN, got soft-blocked, or was hot-plugged
+        # after start(). Cheap (one rfkill + one ip link call) and idempotent.
+        if self._iface_zero_scans.get(interface, 0) > 0 or interface not in self._iface_prepared:
+            self._prepare_interface(interface)
+
         networks = []
 
-        # Method 1: Active full-channel sweep — trigger scan across ALL
-        # frequencies so the kernel visits every channel.  This is critical
-        # for stationary wardriving where `scan dump` alone only returns
-        # networks on the associated channel + whatever the kernel happened
-        # to scan recently.
+        # Method 1: Active full-channel sweep — trigger scan across every
+        # frequency this radio supports. We filter against the phy's actual
+        # channel list because the kernel returns -EINVAL on the whole
+        # trigger if even one requested frequency is unsupported (e.g. a
+        # 5 GHz freq on a 2.4-GHz-only adapter like rt2800usb).
+        trigger_err = ''
         try:
-            freq_args = []
-            for f in self._ALL_FREQUENCIES:
-                freq_args += ['freq', str(f)]
-            trigger_cmd = ['sudo', 'iw', 'dev', interface, 'scan', 'trigger'] + freq_args
+            sweep_freqs = self._iface_supported_freqs(interface)
+            trigger_cmd = ['sudo', 'iw', 'dev', interface, 'scan', 'trigger']
+            for f in sweep_freqs:
+                trigger_cmd += ['freq', str(f)]
             trigger = subprocess.run(
                 trigger_cmd,
                 capture_output=True, text=True, timeout=5
             )
+            # Retry once on EBUSY — another process (NetworkManager, WiFiManager)
+            # may have a scan in flight on this radio. Wait long enough for a
+            # typical scan to complete, then try again.
+            if trigger.returncode != 0 and 'busy' in (trigger.stderr or '').lower():
+                time.sleep(2.5)
+                trigger = subprocess.run(
+                    trigger_cmd,
+                    capture_output=True, text=True, timeout=5
+                )
             if trigger.returncode == 0:
                 # Wait for the full sweep to finish (typically 2-3 s for all channels)
                 time.sleep(2.0)
@@ -1550,9 +2210,16 @@ class WardrivingEngine:
                 if result.returncode == 0 and result.stdout.strip():
                     networks = self._parse_iw_scan(result.stdout, interface)
                     if networks:
+                        self._iface_last_error.pop(interface, None)
                         return networks
+            else:
+                trigger_err = (trigger.stderr or trigger.stdout or '').strip().splitlines()[-1:] or ['']
+                trigger_err = trigger_err[0][:200]
         except Exception as e:
+            trigger_err = str(e)[:200]
             logger.debug(f"iw full-channel sweep failed on {interface}: {e}")
+        if trigger_err:
+            self._iface_last_error[interface] = trigger_err
 
         # Method 2: iw scan dump (reads cached scan results — fast fallback)
         try:
@@ -1596,6 +2263,20 @@ class WardrivingEngine:
                 networks = self._parse_nmcli_scan(result.stdout)
         except Exception as e:
             logger.debug(f"nmcli scan failed on {interface}: {e}")
+
+        # Track consecutive empty scans so we self-heal and surface real failures
+        # instead of silently returning [] forever.
+        if networks:
+            self._iface_zero_scans[interface] = 0
+            self._iface_last_error.pop(interface, None)
+        else:
+            n = self._iface_zero_scans.get(interface, 0) + 1
+            self._iface_zero_scans[interface] = n
+            if n == 3 or (n > 3 and n % 10 == 0):
+                logger.warning(
+                    f"Wardriving: {interface} returned 0 networks for {n} consecutive scans "
+                    f"(check 'ip link show {interface}', 'rfkill list', and NetworkManager state)"
+                )
 
         return networks
 
