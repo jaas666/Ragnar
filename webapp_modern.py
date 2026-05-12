@@ -102,6 +102,13 @@ def check_authentication():
     if any(path.startswith(p) for p in static_prefixes):
         return
 
+    # Kiosk loopback bypass: any request originating from the Pi itself
+    # (the on-screen kiosk runs chromium pointed at localhost) bypasses auth.
+    # Anyone with local access already has shell on the device, so this
+    # adds no attack surface vs. the existing network-facing auth.
+    if request.remote_addr in ('127.0.0.1', '::1') and shared_data.config.get('kiosk_enabled'):
+        return
+
     # Check if user is authenticated via Flask session
     if not session.get('authenticated'):
         if path.startswith('/api/'):
@@ -984,6 +991,161 @@ def _stop_service(service_name: str) -> tuple[bool, str]:
         logger.warning(detail)
         return False, detail
     return True, 'stopped'
+
+
+KIOSK_SERVICE = 'ragnar-kiosk.service'
+KIOSK_SERVICE_FILE = '/etc/systemd/system/ragnar-kiosk.service'
+KIOSK_INSTALL_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts', 'install_kiosk.sh')
+KIOSK_UNINSTALL_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts', 'uninstall_kiosk.sh')
+KIOSK_AUTOSTART_REL = '.config/autostart/ragnar-kiosk.desktop'
+
+
+def _kiosk_autostart_paths() -> list[str]:
+    """Return every existing per-user autostart .desktop path."""
+    import pwd
+    paths = []
+    try:
+        for entry in pwd.getpwall():
+            if 1000 <= entry.pw_uid < 65534:
+                p = os.path.join(entry.pw_dir, KIOSK_AUTOSTART_REL)
+                if os.path.exists(p):
+                    paths.append(p)
+    except Exception:
+        pass
+    return paths
+
+
+def _kiosk_mode() -> str:
+    """Return 'service', 'autostart', or 'not_installed' based on what's on disk."""
+    if _kiosk_autostart_paths():
+        return 'autostart'
+    if os.path.exists(KIOSK_SERVICE_FILE):
+        return 'service'
+    return 'not_installed'
+
+
+def _kiosk_installed() -> bool:
+    return _kiosk_mode() != 'not_installed'
+
+
+def _kiosk_running() -> bool:
+    """Best-effort: is a kiosk chromium process running right now?"""
+    try:
+        proc = subprocess.run(
+            ['pgrep', '-f', 'ragnar-kiosk-chromium'],
+            capture_output=True, text=True, timeout=5, check=False
+        )
+        return proc.returncode == 0 and bool(proc.stdout.strip())
+    except Exception:
+        return False
+
+
+def _spawn_kiosk_in_session() -> bool:
+    """Find a user with an active wayland/X session and launch the kiosk
+    wrapper into it. Returns True if we managed to dispatch a spawn — not a
+    guarantee chromium actually rendered. Used in autostart mode so toggling
+    enable from the web UI shows the kiosk immediately, without waiting for
+    next login."""
+    import pwd
+    for entry in pwd.getpwall():
+        if not (1000 <= entry.pw_uid < 65534):
+            continue
+        runtime_dir = f"/run/user/{entry.pw_uid}"
+        if not os.path.isdir(runtime_dir):
+            continue
+        try:
+            socket_names = [
+                n for n in os.listdir(runtime_dir)
+                if n.startswith('wayland-') and not n.endswith('.lock')
+            ]
+        except OSError:
+            socket_names = []
+        if not socket_names:
+            continue
+        wl = sorted(socket_names)[0]
+        cmd = [
+            'sudo', '-u', entry.pw_name, '-n',
+            'env',
+            f"HOME={entry.pw_dir}",
+            f"XDG_RUNTIME_DIR={runtime_dir}",
+            f"WAYLAND_DISPLAY={wl}",
+            "DISPLAY=:0",
+            f"RAGNAR_REPO={os.path.dirname(os.path.abspath(__file__))}",
+            '/usr/local/bin/ragnar-kiosk-run',
+        ]
+        try:
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            logger.info(f"[kiosk] spawned into {entry.pw_name}'s session via {wl}")
+            return True
+        except Exception as exc:
+            logger.error(f"[kiosk] failed to spawn into {entry.pw_name}'s session: {exc}")
+    logger.warning("[kiosk] no active wayland session — will launch on next login")
+    return False
+
+
+def _dispatch_kiosk_change(prev_enabled: bool, new_enabled: bool, settings_changed: bool) -> None:
+    """Background worker: install/start/stop the kiosk to match config.
+    Handles both modes (autostart .desktop entry on Pi OS Desktop, systemd
+    unit on Pi OS Lite) — the installer picks the right one."""
+    try:
+        if new_enabled and not prev_enabled:
+            if not _kiosk_installed():
+                logger.info(f"[kiosk] running installer: {KIOSK_INSTALL_SCRIPT}")
+                proc = subprocess.run(
+                    ['sudo', 'bash', KIOSK_INSTALL_SCRIPT],
+                    capture_output=True, text=True, timeout=600, check=False
+                )
+                if proc.returncode != 0:
+                    logger.error(f"[kiosk] install failed (rc={proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}")
+                    return
+                logger.info("[kiosk] install completed")
+            mode = _kiosk_mode()
+            if mode == 'service':
+                enable_proc = _run_systemctl(['enable', '--now', KIOSK_SERVICE])
+                if enable_proc.returncode != 0:
+                    logger.error(f"[kiosk] enable --now failed: {enable_proc.stderr.strip() or enable_proc.stdout.strip()}")
+                else:
+                    logger.info("[kiosk] systemd service enabled and started")
+            else:
+                # Autostart mode: install handles next-login flow. Spawn now too.
+                if not _kiosk_running():
+                    _spawn_kiosk_in_session()
+        elif prev_enabled and not new_enabled:
+            # Kill any running kiosk chromium first (autostart mode)
+            subprocess.run(['sudo', 'pkill', '-f', 'ragnar-kiosk-chromium'],
+                           capture_output=True, timeout=10, check=False)
+            # Tear down both possible artifacts via the uninstaller script
+            logger.info(f"[kiosk] running uninstaller: {KIOSK_UNINSTALL_SCRIPT}")
+            subprocess.run(
+                ['sudo', 'bash', KIOSK_UNINSTALL_SCRIPT],
+                capture_output=True, text=True, timeout=300, check=False
+            )
+            logger.info("[kiosk] kiosk removed")
+        elif new_enabled and settings_changed:
+            mode = _kiosk_mode()
+            if mode == 'service':
+                restart_proc = _run_systemctl(['restart', KIOSK_SERVICE])
+                if restart_proc.returncode != 0:
+                    logger.warning(f"[kiosk] restart failed: {restart_proc.stderr.strip() or restart_proc.stdout.strip()}")
+                else:
+                    logger.info("[kiosk] service restarted to pick up new settings")
+            else:
+                # Autostart mode: kill any running kiosk chromium and relaunch
+                # so it picks up new settings.
+                subprocess.run(['sudo', 'pkill', '-f', 'ragnar-kiosk-chromium'],
+                               capture_output=True, timeout=10, check=False)
+                time.sleep(1)
+                _spawn_kiosk_in_session()
+    except subprocess.TimeoutExpired:
+        logger.error("[kiosk] dispatch timed out")
+    except Exception as exc:
+        logger.error(f"[kiosk] dispatch error: {exc}")
 
 
 def _deferred_self_stop(delay: int = 1) -> None:
@@ -3033,6 +3195,14 @@ def update_config():
         ai_reload_error = None
         epd_type_changed = 'epd_type' in data
 
+        # Capture pre-update kiosk state so we can detect toggles after save.
+        prev_kiosk_enabled = bool(shared_data.config.get('kiosk_enabled', False))
+        kiosk_settings_keys = {'kiosk_url', 'kiosk_rotation', 'kiosk_hide_cursor'}
+        kiosk_settings_changed = any(
+            k in data and data[k] != shared_data.config.get(k)
+            for k in kiosk_settings_keys
+        )
+
         # Resolve size keys (from web UI) to actual driver names
         if epd_type_changed:
             from shared import resolve_epd_type
@@ -3068,6 +3238,16 @@ def update_config():
                     logger.info("pyserial installed successfully")
                 except Exception as pip_err:
                     logger.warning(f"Failed to install pyserial: {pip_err}")
+
+        # Kiosk dispatch: install/start when newly enabled, stop when disabled,
+        # restart when its display settings (url/rotation/cursor) changed.
+        if 'kiosk_enabled' in data or kiosk_settings_changed:
+            new_kiosk_enabled = bool(shared_data.config.get('kiosk_enabled', False))
+            threading.Thread(
+                target=_dispatch_kiosk_change,
+                args=(prev_kiosk_enabled, new_kiosk_enabled, kiosk_settings_changed),
+                daemon=True
+            ).start()
 
         # Reflect orientation changes immediately for both hardware and screenshots
         from shared import normalize_rotation
@@ -3116,9 +3296,7 @@ def update_config():
         if epd_type_changed:
             response['restart_required'] = True
             response['message'] = 'Display type changed - restarting Ragnar service...'
-            import threading
             def _delayed_restart():
-                import time, os, signal
                 time.sleep(2)  # Give the response time to reach the client
                 logger.info(f"Restarting Ragnar service for EPD type change to: {shared_data.config.get('epd_type')}")
                 subprocess.Popen(['systemctl', 'restart', 'ragnar.service'])
@@ -3128,6 +3306,33 @@ def update_config():
     except Exception as e:
         logger.error(f"Error updating config: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/kiosk/status', methods=['GET'])
+def kiosk_status():
+    """Report the on-screen kiosk state for the Settings UI.
+    Handles both modes: systemd service (Pi OS Lite) and XDG autostart
+    .desktop entry (Pi OS Desktop / coexist mode)."""
+    try:
+        mode = _kiosk_mode()
+        if mode == 'service':
+            state = _systemctl_state_label('ragnar-kiosk')
+        elif mode == 'autostart':
+            state = 'active' if _kiosk_running() else 'inactive'
+        else:
+            state = 'not_installed'
+        return jsonify({
+            'installed': mode != 'not_installed',
+            'mode': mode,
+            'enabled': bool(shared_data.config.get('kiosk_enabled', False)),
+            'service_state': state,
+            'url': shared_data.config.get('kiosk_url', 'http://localhost:8000'),
+            'rotation': shared_data.config.get('kiosk_rotation', 0),
+            'hide_cursor': bool(shared_data.config.get('kiosk_hide_cursor', True)),
+        })
+    except Exception as exc:
+        logger.error(f"Error getting kiosk status: {exc}")
+        return jsonify({'error': str(exc)}), 500
 
 
 @app.route('/api/config/scan-subnets', methods=['GET', 'POST', 'DELETE'])
