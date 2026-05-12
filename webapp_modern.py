@@ -994,17 +994,56 @@ def _stop_service(service_name: str) -> tuple[bool, str]:
 
 
 KIOSK_SERVICE = 'ragnar-kiosk.service'
+KIOSK_SERVICE_FILE = '/etc/systemd/system/ragnar-kiosk.service'
 KIOSK_INSTALL_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts', 'install_kiosk.sh')
 KIOSK_UNINSTALL_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts', 'uninstall_kiosk.sh')
+KIOSK_AUTOSTART_REL = '.config/autostart/ragnar-kiosk.desktop'
+
+
+def _kiosk_autostart_paths() -> list[str]:
+    """Return every existing per-user autostart .desktop path."""
+    import pwd
+    paths = []
+    try:
+        for entry in pwd.getpwall():
+            if 1000 <= entry.pw_uid < 65534:
+                p = os.path.join(entry.pw_dir, KIOSK_AUTOSTART_REL)
+                if os.path.exists(p):
+                    paths.append(p)
+    except Exception:
+        pass
+    return paths
+
+
+def _kiosk_mode() -> str:
+    """Return 'service', 'autostart', or 'not_installed' based on what's on disk."""
+    if _kiosk_autostart_paths():
+        return 'autostart'
+    if os.path.exists(KIOSK_SERVICE_FILE):
+        return 'service'
+    return 'not_installed'
 
 
 def _kiosk_installed() -> bool:
-    """True if the systemd unit file is present."""
-    return os.path.exists('/etc/systemd/system/ragnar-kiosk.service')
+    return _kiosk_mode() != 'not_installed'
+
+
+def _kiosk_running() -> bool:
+    """Best-effort: is a kiosk chromium process running right now?"""
+    try:
+        proc = subprocess.run(
+            ['pgrep', '-f', 'ragnar-kiosk-chromium'],
+            capture_output=True, text=True, timeout=5, check=False
+        )
+        return proc.returncode == 0 and bool(proc.stdout.strip())
+    except Exception:
+        return False
 
 
 def _dispatch_kiosk_change(prev_enabled: bool, new_enabled: bool, settings_changed: bool) -> None:
-    """Background worker: install/start/stop/restart the kiosk service to match config."""
+    """Background worker: install/start/stop the kiosk to match config.
+    Handles both modes (autostart .desktop entry on Pi OS Desktop, systemd
+    unit on Pi OS Lite) — the installer picks the right one."""
     try:
         if new_enabled and not prev_enabled:
             if not _kiosk_installed():
@@ -1017,20 +1056,37 @@ def _dispatch_kiosk_change(prev_enabled: bool, new_enabled: bool, settings_chang
                     logger.error(f"[kiosk] install failed (rc={proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}")
                     return
                 logger.info("[kiosk] install completed")
-            enable_proc = _run_systemctl(['enable', '--now', KIOSK_SERVICE])
-            if enable_proc.returncode != 0:
-                logger.error(f"[kiosk] enable --now failed: {enable_proc.stderr.strip() or enable_proc.stdout.strip()}")
+            mode = _kiosk_mode()
+            if mode == 'service':
+                enable_proc = _run_systemctl(['enable', '--now', KIOSK_SERVICE])
+                if enable_proc.returncode != 0:
+                    logger.error(f"[kiosk] enable --now failed: {enable_proc.stderr.strip() or enable_proc.stdout.strip()}")
+                else:
+                    logger.info("[kiosk] systemd service enabled and started")
             else:
-                logger.info("[kiosk] service enabled and started")
+                logger.info("[kiosk] autostart entry installed — will launch on next login")
         elif prev_enabled and not new_enabled:
-            _run_systemctl(['disable', '--now', KIOSK_SERVICE])
-            logger.info("[kiosk] service disabled and stopped")
+            # Tear down both possible artifacts via the uninstaller script
+            logger.info(f"[kiosk] running uninstaller: {KIOSK_UNINSTALL_SCRIPT}")
+            subprocess.run(
+                ['sudo', 'bash', KIOSK_UNINSTALL_SCRIPT],
+                capture_output=True, text=True, timeout=300, check=False
+            )
+            logger.info("[kiosk] kiosk removed")
         elif new_enabled and settings_changed:
-            restart_proc = _run_systemctl(['restart', KIOSK_SERVICE])
-            if restart_proc.returncode != 0:
-                logger.warning(f"[kiosk] restart failed: {restart_proc.stderr.strip() or restart_proc.stdout.strip()}")
+            mode = _kiosk_mode()
+            if mode == 'service':
+                restart_proc = _run_systemctl(['restart', KIOSK_SERVICE])
+                if restart_proc.returncode != 0:
+                    logger.warning(f"[kiosk] restart failed: {restart_proc.stderr.strip() or restart_proc.stdout.strip()}")
+                else:
+                    logger.info("[kiosk] service restarted to pick up new settings")
             else:
-                logger.info("[kiosk] service restarted to pick up new settings")
+                # Autostart mode: kill any running kiosk chromium so the user
+                # can relaunch with new settings (the wrapper reads config fresh).
+                subprocess.run(['pkill', '-f', 'ragnar-kiosk-chromium'],
+                               capture_output=True, timeout=10, check=False)
+                logger.info("[kiosk] killed running kiosk chromium; user must relaunch")
     except subprocess.TimeoutExpired:
         logger.error("[kiosk] dispatch timed out")
     except Exception as exc:
@@ -3199,11 +3255,20 @@ def update_config():
 
 @app.route('/api/kiosk/status', methods=['GET'])
 def kiosk_status():
-    """Report the on-screen kiosk service state for the Settings UI."""
+    """Report the on-screen kiosk state for the Settings UI.
+    Handles both modes: systemd service (Pi OS Lite) and XDG autostart
+    .desktop entry (Pi OS Desktop / coexist mode)."""
     try:
-        state = _systemctl_state_label('ragnar-kiosk') if _kiosk_installed() else 'not_installed'
+        mode = _kiosk_mode()
+        if mode == 'service':
+            state = _systemctl_state_label('ragnar-kiosk')
+        elif mode == 'autostart':
+            state = 'active' if _kiosk_running() else 'inactive'
+        else:
+            state = 'not_installed'
         return jsonify({
-            'installed': _kiosk_installed(),
+            'installed': mode != 'not_installed',
+            'mode': mode,
             'enabled': bool(shared_data.config.get('kiosk_enabled', False)),
             'service_state': state,
             'url': shared_data.config.get('kiosk_url', 'http://localhost:8000'),

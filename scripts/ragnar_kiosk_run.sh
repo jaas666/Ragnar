@@ -1,13 +1,31 @@
 #!/bin/bash
-# Ragnar kiosk wrapper — launches X + browser in fullscreen kiosk mode.
+# Ragnar kiosk wrapper — auto-detects environment:
+#   * Already inside a Wayland/X session (autostart mode): just launch
+#     chromium in --kiosk pointed at the configured URL.
+#   * No session present (systemd service mode on Pi OS Lite): spawn our
+#     own Xorg on vt7, xauth cookie, openbox WM, then chromium.
+#
 # Reads live config from the running Ragnar instance via /api/config so
-# rotation / URL changes only require `systemctl restart ragnar-kiosk`.
+# rotation / URL changes only require re-running the wrapper.
 
 set -euo pipefail
 
 REPO_ROOT="${RAGNAR_REPO:-$(cd "$(dirname "$0")/.." && pwd -P 2>/dev/null || echo /opt/ragnar)}"
 CONFIG_API="http://127.0.0.1:8000/api/config"
 BROWSER="${RAGNAR_BROWSER:-chromium-browser}"
+if ! command -v "$BROWSER" >/dev/null 2>&1; then
+    for bin in chromium-browser chromium firefox-esr; do
+        if command -v "$bin" >/dev/null 2>&1; then BROWSER="$bin"; break; fi
+    done
+fi
+
+LOG_DIR="${RAGNAR_KIOSK_LOG_DIR:-/var/log/ragnar}"
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+WRAPPER_LOG="$LOG_DIR/kiosk-wrapper.log"
+if : > >(tee -a "$WRAPPER_LOG" 2>/dev/null) 2>/dev/null; then
+    exec > >(tee -a "$WRAPPER_LOG") 2>&1
+fi
+echo "[kiosk-run] start $(date -Iseconds) user=$(id -un) HOME=${HOME:-unset} DISPLAY=${DISPLAY:-unset} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-unset} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-unset}"
 
 # Default config values (mirror shared.py defaults)
 KIOSK_URL="http://localhost:8000"
@@ -15,11 +33,9 @@ KIOSK_ROTATION="0"
 KIOSK_HIDE_CURSOR="true"
 WARDRIVING_ENABLED="false"
 
-# Try to pull live config — non-fatal if Ragnar isn't up yet.
 if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
     cfg="$(curl -fsS --max-time 5 "$CONFIG_API" 2>/dev/null || true)"
     if [[ -n "$cfg" ]]; then
-        # Pipe JSON to Python over stdin (avoids heredoc/quoting hazards).
         parsed="$(printf '%s' "$cfg" | python3 -c '
 import json, shlex, sys
 try:
@@ -31,44 +47,62 @@ print("KIOSK_ROTATION=" + shlex.quote(str(d.get("kiosk_rotation", 0))))
 print("KIOSK_HIDE_CURSOR=" + ("true" if d.get("kiosk_hide_cursor", True) else "false"))
 print("WARDRIVING_ENABLED=" + ("true" if d.get("wardriving_enabled", False) else "false"))
 ' 2>/dev/null || true)"
-        if [[ -n "$parsed" ]]; then
-            eval "$parsed"
-        fi
+        if [[ -n "$parsed" ]]; then eval "$parsed"; fi
     fi
 fi
 
-# Tag the URL so the SPA can render kiosk layout + skip auth via loopback.
 QS_SEP="?"
-if [[ "$KIOSK_URL" == *"?"* ]]; then
-    QS_SEP="&"
-fi
+if [[ "$KIOSK_URL" == *"?"* ]]; then QS_SEP="&"; fi
 FINAL_URL="${KIOSK_URL}${QS_SEP}kiosk=1"
-# Route wardriving rigs straight to the wardriving live view.
 if [[ "$WARDRIVING_ENABLED" == "true" ]]; then
     FINAL_URL="${FINAL_URL}#wardriving"
 fi
+echo "[kiosk-run] target URL: $FINAL_URL"
 
-# Persistent log location so Xorg crash output survives across restarts.
-LOG_DIR="${RAGNAR_KIOSK_LOG_DIR:-/var/log/ragnar}"
-mkdir -p "$LOG_DIR" 2>/dev/null || true
+# Per-kiosk chromium profile so we don't trip "restore tabs" prompts.
+PROFILE_DIR="$HOME/.config/ragnar-kiosk-chromium"
+mkdir -p "$PROFILE_DIR" 2>/dev/null || true
+
+CHROMIUM_ARGS=(
+    --kiosk
+    --noerrdialogs
+    --disable-infobars
+    --disable-translate
+    --disable-features=TranslateUI,Translate
+    --no-first-run
+    --check-for-update-interval=31536000
+    --user-data-dir="$PROFILE_DIR"
+    --app="$FINAL_URL"
+)
+
+# Wait for Ragnar's web server to actually answer (max 60s).
+for i in $(seq 1 60); do
+    if curl -fsS --max-time 2 "$KIOSK_URL" >/dev/null 2>&1; then break; fi
+    sleep 1
+done
+
+# ---------------------------------------------------------------------------
+# MODE A: existing session — just launch chromium into it.
+# Triggered when WAYLAND_DISPLAY or DISPLAY is already set (XDG autostart
+# always sets these for us; the user can also invoke manually from a
+# terminal inside their session).
+# ---------------------------------------------------------------------------
+if [[ -n "${WAYLAND_DISPLAY:-}" || -n "${DISPLAY:-}" ]]; then
+    echo "[kiosk-run] running inside existing session — launching chromium directly"
+    exec "$BROWSER" "${CHROMIUM_ARGS[@]}"
+fi
+
+# ---------------------------------------------------------------------------
+# MODE B: no session — start our own Xorg, then chromium under it.
+# This is the Pi OS Lite / systemd-service path.
+# ---------------------------------------------------------------------------
+echo "[kiosk-run] no session env — spinning up own X server"
+
 XORG_LOG="$LOG_DIR/kiosk-Xorg.log"
-WRAPPER_LOG="$LOG_DIR/kiosk-wrapper.log"
-# Mirror this wrapper's own stdout/stderr into a log file too (helps when
-# the issue is xinit/xauth, not the X server itself).
-exec > >(tee -a "$WRAPPER_LOG") 2>&1
-echo "[kiosk-run] start $(date -Iseconds) HOME=$HOME XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-unset}"
-
-# Pi OS keeps the Xorg default-log dir in the user's home; create it too.
 mkdir -p "$HOME/.local/share/xorg" 2>/dev/null || true
-
-# Clean up stale X locks/sockets from any prior crashed Xorg on :0.
 rm -f /tmp/.X0-lock 2>/dev/null || true
 rm -f /tmp/.X11-unix/X0 2>/dev/null || true
 
-# Explicit xauth cookie. Under systemd PAMName=login, xinit's automatic
-# cookie generation doesn't always land in $HOME/.Xauthority, which is
-# why we get "Authorization required, but no authorization protocol
-# specified". Generate one ourselves.
 export XAUTHORITY="$HOME/.Xauthority"
 touch "$XAUTHORITY" 2>/dev/null || true
 chmod 600 "$XAUTHORITY" 2>/dev/null || true
@@ -86,17 +120,14 @@ if command -v xauth >/dev/null 2>&1; then
     fi
 fi
 
-# Per-run session script (still cleaned, but Xorg log is kept).
 SESSION_SCRIPT="$(mktemp --tmpdir ragnar-kiosk-XXXXXX.sh)"
 trap 'rm -f "$SESSION_SCRIPT"' EXIT
 cat > "$SESSION_SCRIPT" <<EOF
 #!/bin/bash
-# Disable screen blanking / DPMS
 xset s off || true
 xset s noblank || true
 xset -dpms || true
 
-# Apply rotation if requested
 case "$KIOSK_ROTATION" in
     90)  ROT=left ;;
     180) ROT=inverted ;;
@@ -108,29 +139,15 @@ if [[ -n "\$PRIMARY" && "\$ROT" != "normal" ]]; then
     xrandr --output "\$PRIMARY" --rotate "\$ROT" || true
 fi
 
-# Window manager (lightweight, just for fullscreen handling)
 if command -v openbox-session >/dev/null 2>&1; then
     openbox-session &
 elif command -v openbox >/dev/null 2>&1; then
     openbox &
 fi
 
-# Hide the cursor when idle
 if [[ "$KIOSK_HIDE_CURSOR" == "true" ]] && command -v unclutter >/dev/null 2>&1; then
     unclutter -idle 0 -root &
 fi
-
-# Wait for Ragnar's web server to actually answer (max 60s) before launching.
-for i in \$(seq 1 60); do
-    if curl -fsS --max-time 2 "$KIOSK_URL" >/dev/null 2>&1; then
-        break
-    fi
-    sleep 1
-done
-
-# Per-kiosk profile dir so a crashed session doesn't trip "restore tabs" prompts.
-PROFILE_DIR="\$HOME/.config/ragnar-kiosk-chromium"
-mkdir -p "\$PROFILE_DIR"
 
 exec "$BROWSER" \\
     --kiosk \\
@@ -140,7 +157,7 @@ exec "$BROWSER" \\
     --disable-features=TranslateUI,Translate \\
     --no-first-run \\
     --check-for-update-interval=31536000 \\
-    --user-data-dir="\$PROFILE_DIR" \\
+    --user-data-dir="\$HOME/.config/ragnar-kiosk-chromium" \\
     --app="$FINAL_URL"
 EOF
 chmod +x "$SESSION_SCRIPT"
