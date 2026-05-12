@@ -89,6 +89,33 @@ done
 # ---------------------------------------------------------------------------
 if [[ -n "${WAYLAND_DISPLAY:-}" || -n "${DISPLAY:-}" ]]; then
     echo "[kiosk-run] running inside existing session — launching chromium directly"
+
+    # Apply rotation via wlr-randr (labwc/wlroots) or xrandr (X session).
+    case "$KIOSK_ROTATION" in
+        90|180|270)
+            if [[ -n "${WAYLAND_DISPLAY:-}" ]] && command -v wlr-randr >/dev/null 2>&1; then
+                # wlr-randr's --transform takes: normal|90|180|270|flipped|flipped-90|...
+                OUTPUT="$(wlr-randr 2>/dev/null | awk '/^[^ ]/ {print $1; exit}')"
+                if [[ -n "$OUTPUT" ]]; then
+                    echo "[kiosk-run] wlr-randr: rotating $OUTPUT to $KIOSK_ROTATION"
+                    wlr-randr --output "$OUTPUT" --transform "$KIOSK_ROTATION" 2>&1 || true
+                fi
+            elif [[ -n "${DISPLAY:-}" ]] && command -v xrandr >/dev/null 2>&1; then
+                case "$KIOSK_ROTATION" in
+                    90) XROT=left ;; 180) XROT=inverted ;; 270) XROT=right ;;
+                esac
+                PRIMARY="$(xrandr --query 2>/dev/null | awk '/ connected/ {print $1; exit}')"
+                if [[ -n "$PRIMARY" ]]; then
+                    echo "[kiosk-run] xrandr: rotating $PRIMARY to $XROT"
+                    xrandr --output "$PRIMARY" --rotate "$XROT" 2>&1 || true
+                fi
+            else
+                echo "[kiosk-run] WARN: rotation requested but neither wlr-randr nor xrandr available"
+            fi
+            ;;
+        *) : ;;  # 0 = no rotation
+    esac
+
     exec "$BROWSER" "${CHROMIUM_ARGS[@]}"
 fi
 

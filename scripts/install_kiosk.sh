@@ -141,6 +141,10 @@ if [[ "$MODE" == "service" ]]; then
         PKGS_TO_INSTALL+=(xauth)
     fi
 fi
+# Autostart mode: wlr-randr rotates the Wayland output (labwc/wlroots).
+if [[ "$MODE" == "autostart" ]] && ! command -v wlr-randr >/dev/null 2>&1; then
+    PKGS_TO_INSTALL+=(wlr-randr)
+fi
 
 if [[ "${#PKGS_TO_INSTALL[@]}" -gt 0 ]]; then
     echo "[kiosk-install] apt installing: ${PKGS_TO_INSTALL[*]}"
