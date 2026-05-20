@@ -6332,83 +6332,6 @@ def _get_wardriving_engine():
         _wardriving_engine = WardrivingEngine(shared_data)
     return _wardriving_engine
 
-_power_health_cache = {'ts': 0, 'value': None}
-
-def _get_power_health():
-    """Read Pi power state via vcgencmd. Cached for 5 s. Returns None on
-    non-Pi hosts where vcgencmd is unavailable."""
-    import subprocess, re as _re, time as _time
-    now = _time.time()
-    if now - _power_health_cache['ts'] < 5 and _power_health_cache['value'] is not None:
-        return _power_health_cache['value']
-
-    try:
-        thr_out = subprocess.run(
-            ['vcgencmd', 'get_throttled'],
-            capture_output=True, text=True, timeout=2
-        )
-        if thr_out.returncode != 0:
-            return None
-        m = _re.search(r'throttled=0x([0-9a-fA-F]+)', thr_out.stdout)
-        if not m:
-            return None
-        thr = int(m.group(1), 16)
-    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
-        return None
-
-    ext5v = None
-    try:
-        v_out = subprocess.run(
-            ['vcgencmd', 'pmic_read_adc', 'EXT5V_V'],
-            capture_output=True, text=True, timeout=2
-        )
-        m = _re.search(r'volt\(\d+\)=([\d.]+)V', v_out.stdout)
-        if m:
-            ext5v = float(m.group(1))
-    except Exception:
-        pass
-
-    currently_undervolted = bool(thr & 0x1)
-    currently_capped      = bool(thr & 0x2)
-    currently_throttled   = bool(thr & 0x4)
-    ever_undervolted      = bool(thr & 0x10000)
-    ever_capped           = bool(thr & 0x20000)
-    ever_throttled        = bool(thr & 0x40000)
-
-    status = 'ok'
-    message = None
-    if currently_undervolted or currently_throttled:
-        status = 'critical'
-        if currently_undervolted:
-            message = f"Pi is undervolted right now ({ext5v:.2f} V at input)" if ext5v else "Pi is undervolted right now"
-        else:
-            message = "Pi is currently throttling"
-    elif ext5v is not None and ext5v < 4.70:
-        status = 'critical'
-        message = f"Input voltage low ({ext5v:.2f} V) — close to undervoltage trip, USB devices may fail to enumerate"
-    elif ext5v is not None and ext5v < 4.80:
-        status = 'warning'
-        message = f"Input voltage marginal ({ext5v:.2f} V) — consider a higher-output USB-PD powerbank"
-    elif ever_undervolted or ever_throttled:
-        status = 'warning'
-        message = "Undervoltage / throttling has occurred since boot — power supply may be inadequate under load"
-
-    value = {
-        'available': True,
-        'status': status,
-        'message': message,
-        'ext5v_volts': ext5v,
-        'throttled_hex': f"0x{thr:x}",
-        'currently_undervolted': currently_undervolted,
-        'currently_throttled': currently_throttled,
-        'ever_undervolted': ever_undervolted,
-        'ever_throttled': ever_throttled,
-    }
-    _power_health_cache['ts'] = now
-    _power_health_cache['value'] = value
-    return value
-
-
 @app.route('/api/wardriving/status')
 def wardriving_status():
     """Get wardriving engine status."""
@@ -6418,9 +6341,6 @@ def wardriving_status():
         engine = _get_wardriving_engine()
         status = engine.get_status()
         status['enabled'] = True
-        ph = _get_power_health()
-        if ph is not None:
-            status['power'] = ph
         return jsonify(status)
     except Exception as e:
         logger.error(f"Wardriving status error: {e}")
