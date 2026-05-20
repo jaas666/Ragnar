@@ -13,10 +13,13 @@ import logging
 
 logger = logging.getLogger("GPSManager")
 
-# NMEA sentence parsers
+# NMEA sentence parsers.
+# Talker IDs: any 2-letter prefix (GP, GN, GL, GA, GB/BD, GI, GQ, ...).
+# Time field is optional — pre-fix u-blox emits empty time during cold start,
+# and we still want to know "the GPS is alive, just no fix yet".
 _NMEA_GGA = re.compile(
-    r'^\$(?:GP|GN|GL)GGA,'
-    r'(?P<time>\d{6}(?:\.\d+)?),'
+    r'^\$[A-Z]{2}GGA,'
+    r'(?P<time>\d{6}(?:\.\d+)?)?,'
     r'(?P<lat>\d{2,4}\.\d+)?,(?P<lat_dir>[NS])?,'
     r'(?P<lon>\d{3,5}\.\d+)?,(?P<lon_dir>[EW])?,'
     r'(?P<fix>\d),'
@@ -26,13 +29,21 @@ _NMEA_GGA = re.compile(
 )
 
 _NMEA_RMC = re.compile(
-    r'^\$(?:GP|GN|GL)RMC,'
-    r'(?P<time>\d{6}(?:\.\d+)?),'
+    r'^\$[A-Z]{2}RMC,'
+    r'(?P<time>\d{6}(?:\.\d+)?)?,'
     r'(?P<status>[AV]),'
     r'(?P<lat>\d{2,4}\.\d+)?,(?P<lat_dir>[NS])?,'
     r'(?P<lon>\d{3,5}\.\d+)?,(?P<lon_dir>[EW])?,'
     r'(?P<speed_knots>[^,]*),'
     r'(?P<course>[^,]*),'
+)
+
+# GSV header — body (per-satellite quads of PRN/elev/azim/SNR) is parsed separately
+# because the count of sats per sentence varies (1-4) and the trailing field carries
+# the *checksum.
+_NMEA_GSV_HEADER = re.compile(
+    r'^\$(?P<talker>[A-Z]{2})GSV,(?P<total_msgs>\d+),(?P<msg_num>\d+),(?P<in_view>\d+),'
+    r'(?P<body>.*?)\*[0-9A-Fa-f]{2}\s*$'
 )
 
 
@@ -222,9 +233,13 @@ class GPSManager:
         self.speed_kmh = None
         self.course = None
         self.fix_quality = 0       # 0=no fix, 1=GPS, 2=DGPS
-        self.satellites = 0
+        self.satellites = 0        # satellites used in fix (from GGA)
+        self.satellites_in_view = 0  # total visible across constellations (from GSV)
+        self.snr_max = None        # highest SNR currently reported, dB-Hz (from GSV)
         self.hdop = None
-        self.last_update = 0
+        self.last_update = 0       # last GGA/RMC parsed (position/fix info)
+        self.last_sentence = 0     # last ANY valid NMEA parsed — proves the GPS is alive
+        self._gsv_by_talker = {}   # talker -> (in_view, snr_max, timestamp)
         self.connected = False
         self.error = None
 
@@ -334,6 +349,8 @@ class GPSManager:
                 'has_fix': self.has_fix(),
                 'fix_quality': self.fix_quality,
                 'satellites': self.satellites,
+                'satellites_in_view': self.satellites_in_view,
+                'snr_max': self.snr_max,
                 'hdop': self.hdop,
                 'latitude': self.latitude,
                 'longitude': self.longitude,
@@ -341,6 +358,7 @@ class GPSManager:
                 'speed_kmh': self.speed_kmh,
                 'course': self.course,
                 'last_update': self.last_update,
+                'last_sentence': self.last_sentence,
                 'error': self.error
             }
 
@@ -404,6 +422,7 @@ class GPSManager:
         """Parse a gpsd TPV (Time-Position-Velocity) object."""
         mode = obj.get('mode', 0)  # 1=no fix, 2=2D, 3=3D
         status = obj.get('status', 1)  # 1=normal GPS, 2=DGPS
+        now = time.time()
         with self._lock:
             if mode >= 2 and 'lat' in obj and 'lon' in obj:
                 self.latitude = obj['lat']
@@ -414,20 +433,24 @@ class GPSManager:
                 self.course = obj.get('track')
                 self.fix_quality = 2 if status == 2 else 1
                 self.hdop = obj.get('hdop') or self.hdop
-                self.last_update = time.time()
+                self.last_update = now
             else:
                 self.fix_quality = 0
+            self.last_sentence = now
 
     def _parse_sky(self, obj):
         """Parse a gpsd SKY object for satellite count and HDOP."""
         with self._lock:
             sats = obj.get('satellites') or []
             used = sum(1 for s in sats if s.get('used', False))
-            if used or sats:
-                self.satellites = used
+            self.satellites = used
+            self.satellites_in_view = len(sats)
+            snrs = [s.get('ss') for s in sats if isinstance(s.get('ss'), (int, float))]
+            self.snr_max = max(snrs) if snrs else None
             hdop = obj.get('hdop')
             if hdop is not None:
                 self.hdop = hdop
+            self.last_sentence = time.time()
 
     def _read_loop(self):
         """Background thread: read NMEA sentences and parse position."""
@@ -499,6 +522,8 @@ class GPSManager:
 
     def _parse_nmea(self, line):
         """Parse a single NMEA sentence."""
+        now = time.time()
+
         # GGA — position + fix quality + satellites + altitude
         m = _NMEA_GGA.match(line)
         if m:
@@ -524,7 +549,8 @@ class GPSManager:
                     self.altitude = float(m.group('alt')) if m.group('alt') else None
                 except (ValueError, TypeError):
                     pass
-                self.last_update = time.time()
+                self.last_update = now
+                self.last_sentence = now
             return
 
         # RMC — position + speed + course
@@ -546,9 +572,61 @@ class GPSManager:
                         self.course = float(m.group('course')) if m.group('course') else None
                     except (ValueError, TypeError):
                         pass
-                    self.last_update = time.time()
+                    self.last_update = now
+                    self.last_sentence = now
             else:
                 # RMC 'V' (void) — don't reset fix_quality here.
                 # GGA is the authoritative source for fix quality.
                 # Many GPS modules send brief RMC 'V' during movement.
+                with self._lock:
+                    self.last_sentence = now
+            return
+
+        # GSV — satellites in view (per constellation). One talker = one constellation;
+        # aggregate the most recent sample from each over the last 30 s. This is
+        # what tells us "the GPS is alive and the antenna sees sky" even before fix.
+        m = _NMEA_GSV_HEADER.match(line)
+        if m:
+            try:
+                talker = m.group('talker')
+                in_view = int(m.group('in_view'))
+                # Body = "PRN,elev,azim,snr,PRN,elev,azim,snr,..." up to 4 sats.
+                # SNR is field index 3 within each 4-tuple; empty = sat tracked but no signal.
+                fields = m.group('body').split(',')
+                snr_max = None
+                for i in range(3, len(fields), 4):
+                    raw = fields[i].strip()
+                    if not raw:
+                        continue
+                    try:
+                        snr = int(raw)
+                    except ValueError:
+                        continue
+                    if snr_max is None or snr > snr_max:
+                        snr_max = snr
+                with self._lock:
+                    prev = self._gsv_by_talker.get(talker, (0, None, 0))
+                    # Merge SNRs within the same multi-sentence GSV cycle (msg_num > 1).
+                    merged_snr = snr_max
+                    if merged_snr is None:
+                        merged_snr = prev[1]
+                    elif prev[1] is not None and now - prev[2] < 2:
+                        merged_snr = max(merged_snr, prev[1])
+                    self._gsv_by_talker[talker] = (in_view, merged_snr, now)
+                    # Prune talkers we haven't heard from in 30 s so the totals
+                    # don't include constellations that stopped reporting.
+                    stale = [t for t, v in self._gsv_by_talker.items() if now - v[2] > 30]
+                    for t in stale:
+                        del self._gsv_by_talker[t]
+                    self.satellites_in_view = sum(v[0] for v in self._gsv_by_talker.values())
+                    snrs = [v[1] for v in self._gsv_by_talker.values() if v[1] is not None]
+                    self.snr_max = max(snrs) if snrs else None
+                    self.last_sentence = now
+            except Exception:
                 pass
+            return
+
+        # Any other recognized NMEA — at least mark the device as alive.
+        if line.startswith('$') and len(line) > 6 and line[3:6] in ('VTG', 'GSA', 'GLL', 'TXT'):
+            with self._lock:
+                self.last_sentence = now
