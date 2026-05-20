@@ -14727,12 +14727,14 @@ function updateWardrivingUI(status) {
     const gpsStatus = document.getElementById('wd-gps-status');
     const gpsCoords = document.getElementById('wd-gps-coords');
     const gpsSats = document.getElementById('wd-gps-sats');
+    const satsInView = gps.satellites_in_view || 0;
+    const satsUsed = gps.satellites || 0;
     if (gpsStatus) {
         if (gps.has_fix) {
             gpsStatus.textContent = 'GPS-Fix OK';
             gpsStatus.className = 'text-sm font-bold text-emerald-400';
         } else if (gps.connected && status.running) {
-            gpsStatus.textContent = 'Searching...';
+            gpsStatus.textContent = satsInView > 0 ? `Searching (${satsInView} visible)` : 'Searching...';
             gpsStatus.className = 'text-sm font-bold text-yellow-400';
         } else if (gps.connected) {
             gpsStatus.textContent = 'Connected';
@@ -14745,7 +14747,14 @@ function updateWardrivingUI(status) {
     if (gpsCoords) {
         gpsCoords.textContent = (gps.latitude && gps.longitude) ? `${gps.latitude.toFixed(5)}, ${gps.longitude.toFixed(5)}` : '-';
     }
-    if (gpsSats) gpsSats.textContent = `Sats: ${gps.satellites || '-'} | HDOP: ${gps.hdop || '-'}`;
+    if (gpsSats) {
+        // Show "used / in-view" so users can tell "GPS sees nothing" from
+        // "GPS sees sky but doesn't have enough lock for a fix yet".
+        const parts = [`Sats: ${satsUsed}/${satsInView}`];
+        if (gps.snr_max != null) parts.push(`SNR ${gps.snr_max} dB`);
+        if (gps.hdop != null && gps.hdop < 50) parts.push(`HDOP ${gps.hdop.toFixed(1)}`);
+        gpsSats.textContent = parts.join(' · ');
+    }
 
     // Speed & direction
     const speedEl = document.getElementById('wd-speed-val');
