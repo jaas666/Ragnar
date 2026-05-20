@@ -3691,6 +3691,15 @@
         <!-- Wardriving Tab -->
         <div id="wardriving-tab" class="tab-content hidden">
             <div class="glass rounded-xl p-4 sm:p-6">
+                <div id="wd-power-warning" class="hidden mb-4 px-4 py-3 rounded-lg border flex items-start gap-3">
+                    <svg class="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5 19h14a2 2 0 001.84-2.75L13.74 4a2 2 0 00-3.48 0L3.16 16.25A2 2 0 005 19z"/>
+                    </svg>
+                    <div class="text-sm">
+                        <div id="wd-power-warning-title" class="font-semibold">Power supply issue</div>
+                        <div id="wd-power-warning-msg" class="text-xs opacity-90 mt-0.5"></div>
+                    </div>
+                </div>
                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
                     <div class="flex items-center space-x-3">
                         <h2 class="text-lg sm:text-2xl font-bold">Wardriving</h2>
@@ -4911,7 +4920,7 @@
     </div>
 
     <!-- JavaScript -->
-    <script src="/web/scripts/ragnar_modern.js?v=20260520b"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260520c"></script>
 
 </body>
 </html>

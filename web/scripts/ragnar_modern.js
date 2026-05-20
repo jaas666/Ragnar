@@ -14712,7 +14712,25 @@ async function refreshWardrivingStatus() {
 function updateWardrivingUI(status) {
     const badge = document.getElementById('wd-status-badge');
 
-    // Sync running state and toggle button
+    const powerEl = document.getElementById('wd-power-warning');
+    if (powerEl) {
+        const p = status.power;
+        if (p && p.status && p.status !== 'ok' && p.message) {
+            powerEl.classList.remove('hidden');
+            const isCritical = p.status === 'critical';
+            powerEl.className = 'mb-4 px-4 py-3 rounded-lg border flex items-start gap-3 ' +
+                (isCritical
+                    ? 'bg-red-900/30 border-red-500/50 text-red-200'
+                    : 'bg-yellow-900/30 border-yellow-500/50 text-yellow-200');
+            const titleEl = document.getElementById('wd-power-warning-title');
+            const msgEl = document.getElementById('wd-power-warning-msg');
+            if (titleEl) titleEl.textContent = isCritical ? 'Power supply critical' : 'Power supply marginal';
+            if (msgEl) msgEl.textContent = p.message;
+        } else {
+            powerEl.classList.add('hidden');
+        }
+    }
+
     _wardrivingRunning = !!status.running;
     updateWardrivingToggleButton();
 
