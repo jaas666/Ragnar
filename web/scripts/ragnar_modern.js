@@ -14748,8 +14748,6 @@ function updateWardrivingUI(status) {
         gpsCoords.textContent = (gps.latitude && gps.longitude) ? `${gps.latitude.toFixed(5)}, ${gps.longitude.toFixed(5)}` : '-';
     }
     if (gpsSats) {
-        // Show "used / in-view" so users can tell "GPS sees nothing" from
-        // "GPS sees sky but doesn't have enough lock for a fix yet".
         const parts = [`Sats: ${satsUsed}/${satsInView}`];
         if (gps.snr_max != null) parts.push(`SNR ${gps.snr_max} dB`);
         if (gps.hdop != null && gps.hdop < 50) parts.push(`HDOP ${gps.hdop.toFixed(1)}`);
@@ -14820,7 +14818,8 @@ function updateWardrivingUI(status) {
                 const modeLabels = {
                     wifi: 'WiFi', 'ble-flipper': '🐬 Flipper',
                     'ble-airtag': '🏷️ AirTag', 'ble-skimmer': '💳 Skimmer',
-                    pineap: '🍍 PineAP', ble: 'BLE', stations: 'Stations'
+                    pineap: '🍍 PineAP', ble: 'BLE', stations: 'Stations',
+                    wardrive: '🏎️ Wardrive (fast)'
                 };
                 modeEl.textContent = modeLabels[status.esp_mode] || status.esp_mode || '';
             }

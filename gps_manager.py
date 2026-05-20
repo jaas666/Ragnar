@@ -13,10 +13,6 @@ import logging
 
 logger = logging.getLogger("GPSManager")
 
-# NMEA sentence parsers.
-# Talker IDs: any 2-letter prefix (GP, GN, GL, GA, GB/BD, GI, GQ, ...).
-# Time field is optional — pre-fix u-blox emits empty time during cold start,
-# and we still want to know "the GPS is alive, just no fix yet".
 _NMEA_GGA = re.compile(
     r'^\$[A-Z]{2}GGA,'
     r'(?P<time>\d{6}(?:\.\d+)?)?,'
@@ -38,9 +34,6 @@ _NMEA_RMC = re.compile(
     r'(?P<course>[^,]*),'
 )
 
-# GSV header — body (per-satellite quads of PRN/elev/azim/SNR) is parsed separately
-# because the count of sats per sentence varies (1-4) and the trailing field carries
-# the *checksum.
 _NMEA_GSV_HEADER = re.compile(
     r'^\$(?P<talker>[A-Z]{2})GSV,(?P<total_msgs>\d+),(?P<msg_num>\d+),(?P<in_view>\d+),'
     r'(?P<body>.*?)\*[0-9A-Fa-f]{2}\s*$'
@@ -232,14 +225,14 @@ class GPSManager:
         self.altitude = None
         self.speed_kmh = None
         self.course = None
-        self.fix_quality = 0       # 0=no fix, 1=GPS, 2=DGPS
-        self.satellites = 0        # satellites used in fix (from GGA)
-        self.satellites_in_view = 0  # total visible across constellations (from GSV)
-        self.snr_max = None        # highest SNR currently reported, dB-Hz (from GSV)
+        self.fix_quality = 0
+        self.satellites = 0
+        self.satellites_in_view = 0
+        self.snr_max = None
         self.hdop = None
-        self.last_update = 0       # last GGA/RMC parsed (position/fix info)
-        self.last_sentence = 0     # last ANY valid NMEA parsed — proves the GPS is alive
-        self._gsv_by_talker = {}   # talker -> (in_view, snr_max, timestamp)
+        self.last_update = 0
+        self.last_sentence = 0
+        self._gsv_by_talker = {}
         self.connected = False
         self.error = None
 
@@ -575,23 +568,15 @@ class GPSManager:
                     self.last_update = now
                     self.last_sentence = now
             else:
-                # RMC 'V' (void) — don't reset fix_quality here.
-                # GGA is the authoritative source for fix quality.
-                # Many GPS modules send brief RMC 'V' during movement.
                 with self._lock:
                     self.last_sentence = now
             return
 
-        # GSV — satellites in view (per constellation). One talker = one constellation;
-        # aggregate the most recent sample from each over the last 30 s. This is
-        # what tells us "the GPS is alive and the antenna sees sky" even before fix.
         m = _NMEA_GSV_HEADER.match(line)
         if m:
             try:
                 talker = m.group('talker')
                 in_view = int(m.group('in_view'))
-                # Body = "PRN,elev,azim,snr,PRN,elev,azim,snr,..." up to 4 sats.
-                # SNR is field index 3 within each 4-tuple; empty = sat tracked but no signal.
                 fields = m.group('body').split(',')
                 snr_max = None
                 for i in range(3, len(fields), 4):
@@ -606,15 +591,12 @@ class GPSManager:
                         snr_max = snr
                 with self._lock:
                     prev = self._gsv_by_talker.get(talker, (0, None, 0))
-                    # Merge SNRs within the same multi-sentence GSV cycle (msg_num > 1).
                     merged_snr = snr_max
                     if merged_snr is None:
                         merged_snr = prev[1]
                     elif prev[1] is not None and now - prev[2] < 2:
                         merged_snr = max(merged_snr, prev[1])
                     self._gsv_by_talker[talker] = (in_view, merged_snr, now)
-                    # Prune talkers we haven't heard from in 30 s so the totals
-                    # don't include constellations that stopped reporting.
                     stale = [t for t, v in self._gsv_by_talker.items() if now - v[2] > 30]
                     for t in stale:
                         del self._gsv_by_talker[t]
@@ -626,7 +608,6 @@ class GPSManager:
                 pass
             return
 
-        # Any other recognized NMEA — at least mark the device as alive.
         if line.startswith('$') and len(line) > 6 and line[3:6] in ('VTG', 'GSA', 'GLL', 'TXT'):
             with self._lock:
                 self.last_sentence = now

@@ -329,10 +329,14 @@ class WardrivingSession:
                                     ssid = COALESCE(NULLIF(?, ''), ssid),
                                     security = COALESCE(NULLIF(?, ''), security),
                                     channel = ?, frequency = ?, rssi = ?,
-                                    latitude = ?, longitude = ?, altitude = ?,
-                                    speed_kmh = ?, hdop = ?,
+                                    latitude  = COALESCE(?, latitude),
+                                    longitude = COALESCE(?, longitude),
+                                    altitude  = COALESCE(?, altitude),
+                                    speed_kmh = COALESCE(?, speed_kmh),
+                                    hdop      = COALESCE(?, hdop),
                                     last_seen = ?, best_rssi = ?,
-                                    best_lat = ?, best_lon = ?,
+                                    best_lat  = COALESCE(?, best_lat),
+                                    best_lon  = COALESCE(?, best_lon),
                                     scan_count = ?, interface = ?, band = ?
                                 WHERE bssid = ?
                             """, (ssid, security, channel, frequency, rssi,
@@ -2835,7 +2839,7 @@ class WardrivingEngine:
 
         while self._running:
             try:
-                ser = pyserial.Serial(self._serial_port, 115200, timeout=2)
+                ser = pyserial.Serial(self._serial_port, 460800, timeout=2)
                 self.serial_connected = True
                 logger.info(f"Serial connected: {self._serial_port}")
 
@@ -2894,6 +2898,11 @@ class WardrivingEngine:
                     for line in self._huginn_initial_push_lines():
                         self._huginn_config_queue.put(line)
                     self._huginn_handshake_pushed = True
+
+                if self._companion_name == 'Huginn':
+                    self._run_huginn_wardrive_loop(ser)
+                    ser.close()
+                    continue
 
                 cycle_index = 0
 
@@ -2957,6 +2966,47 @@ class WardrivingEngine:
 
         self.serial_connected = False
         logger.info("Serial ESP32 listener stopped")
+
+    def _run_huginn_wardrive_loop(self, ser):
+        self._current_esp_mode = 'wardrive'
+        try:
+            self._drain_huginn_queue(ser)
+            ser.reset_input_buffer()
+            ser.write(b"wardrive\r\n")
+            logger.info("HuginnESP: entered fast wardrive mode")
+        except Exception as e:
+            logger.warning(f"Failed to start Huginn wardrive mode: {e}")
+            return
+
+        last_config_drain = time.time()
+        while self._running:
+            try:
+                raw = ser.readline()
+                if raw:
+                    line = raw.decode('utf-8', errors='replace').strip()
+                    if line:
+                        self._parse_serial_line(line)
+                now = time.time()
+                if now - last_config_drain > 5:
+                    self._drain_huginn_queue(ser)
+                    last_config_drain = now
+            except Exception as e:
+                logger.debug(f"Serial read error (wardrive): {e}")
+                break
+
+        if self._serial_entry_buffer.get('bssid'):
+            pos = self._gps.get_position() if self._gps else None
+            self._flush_serial_entry(
+                pos['lat'] if pos else None,
+                pos['lon'] if pos else None,
+                pos.get('alt') if pos else None
+            )
+            self._serial_entry_buffer = {}
+
+        try:
+            ser.write(b"stop\r\n")
+        except Exception:
+            pass
 
     def _parse_serial_line(self, line):
         """Parse a single line from ESP32 serial output."""
