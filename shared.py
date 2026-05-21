@@ -654,6 +654,7 @@ class SharedData:
             
             "__title_network__": "Network",
             "nmap_scan_aggressivity": "-T4",
+            "scan_intensity": "high",
             "portstart": 1,
             "portend": 5500,
             "scan_subnets": [],
