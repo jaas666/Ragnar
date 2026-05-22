@@ -9085,7 +9085,7 @@ def network_threat_sweep():
         _ROGUE_SSID_PATTERNS = [
             (_re.compile(r'piglet', _re.I), 'Piglet Wardriver', 'high',
              'Piglet wardriving device AP detected nearby'),
-            (_re.compile(r'pineapple|hak5|^pager$', _re.I), 'WiFi Pineapple', 'critical',
+            (_re.compile(r'pineapple|hak5|^pager$|pagerap', _re.I), 'WiFi Pineapple', 'critical',
              'Hak5 WiFi Pineapple rogue AP detected'),
             (_re.compile(r'pwned|pwnagotchi', _re.I), 'Pwnagotchi', 'high',
              'Pwnagotchi handshake capture device detected'),
