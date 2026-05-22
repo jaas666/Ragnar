@@ -7426,22 +7426,109 @@ def _execute_git_update(repo_path: str) -> dict:
         logger.warning(warning)
         result['warnings'].append(warning)
 
-    # Perform git pull
+    # Remove stale lock files that cause "Another git process seems to be
+    # running" errors — the most common reason the first update attempt
+    # fails but a retry succeeds.
+    git_dir = os.path.join(repo_path, '.git')
+    for lock_name in ('index.lock', 'shallow.lock', 'HEAD.lock',
+                      os.path.join('refs', 'heads', 'main.lock')):
+        lock_path = os.path.join(git_dir, lock_name)
+        if os.path.isfile(lock_path):
+            try:
+                os.remove(lock_path)
+                warning = f"Removed stale lock file: {lock_name}"
+                logger.warning(warning)
+                result['warnings'].append(warning)
+            except OSError as e:
+                logger.debug(f"Could not remove {lock_name}: {e}")
+
+    # Ensure safe-directory is configured (avoids ownership errors)
     try:
-        pull_proc = subprocess.run(
-            ['git', 'pull'],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            check=True
+        subprocess.run(
+            ['git', 'config', '--global', '--add', 'safe.directory', repo_path],
+            cwd=repo_path, capture_output=True, text=True, check=False
         )
-        result['output'] = pull_proc.stdout.strip()
-        logger.info(f"Git pull completed: {result['output']}")
-    except subprocess.CalledProcessError as e:
-        error_msg = f"Git pull failed: {e.stderr.strip() or e.stdout.strip() or str(e)}"
-        logger.error(error_msg)
-        result['error'] = error_msg
-        return result
+    except Exception:
+        pass
+
+    # Perform git pull with one automatic retry on failure
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        try:
+            pull_proc = subprocess.run(
+                ['git', 'pull'],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            result['output'] = pull_proc.stdout.strip()
+            logger.info(f"Git pull completed: {result['output']}")
+            break  # success
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr.strip() or e.stdout.strip() or str(e)
+            logger.error(f"Git pull attempt {attempt}/{max_attempts} failed: {error_msg}")
+
+            if attempt >= max_attempts:
+                result['error'] = f"Git pull failed: {error_msg}"
+                return result
+
+            # Auto-recover before retrying
+            recovered = False
+            err_lower = error_msg.lower()
+
+            # Lock file appeared during pull
+            if 'lock' in err_lower or 'another git process' in err_lower:
+                for lock_name in ('index.lock', 'shallow.lock', 'HEAD.lock'):
+                    lp = os.path.join(git_dir, lock_name)
+                    if os.path.isfile(lp):
+                        try:
+                            os.remove(lp)
+                            recovered = True
+                        except OSError:
+                            pass
+                if recovered:
+                    result['warnings'].append("Removed lock file and retrying pull")
+
+            # Merge conflict or dirty state
+            if 'conflict' in err_lower or 'merge' in err_lower or 'overwritten by merge' in err_lower:
+                try:
+                    subprocess.run(
+                        ['git', 'reset', '--hard', 'HEAD'],
+                        cwd=repo_path, capture_output=True, text=True, check=True
+                    )
+                    recovered = True
+                    result['warnings'].append("Reset working tree to resolve conflicts and retrying pull")
+                except Exception:
+                    pass
+
+            # Diverged history
+            if 'diverge' in err_lower or 'need to specify' in err_lower:
+                try:
+                    subprocess.run(
+                        ['git', 'pull', '--rebase'],
+                        cwd=repo_path, capture_output=True, text=True, check=True
+                    )
+                    result['output'] = 'Pulled with rebase after divergence'
+                    result['warnings'].append("Branches had diverged; resolved with rebase")
+                    recovered = True
+                    break  # rebase pull already succeeded
+                except Exception:
+                    pass
+
+            if not recovered:
+                # Generic recovery: reset and retry
+                try:
+                    subprocess.run(
+                        ['git', 'reset', '--hard', 'HEAD'],
+                        cwd=repo_path, capture_output=True, text=True, check=True
+                    )
+                    result['warnings'].append(f"Auto-recovery: reset working tree and retrying (was: {error_msg})")
+                except Exception:
+                    result['error'] = f"Git pull failed: {error_msg}"
+                    return result
+
+            logger.info(f"Auto-recovery applied, retrying git pull...")
 
     # Ensure executable bits remain in place after pull
     try:
