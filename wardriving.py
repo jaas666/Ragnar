@@ -2895,6 +2895,14 @@ class WardrivingEngine:
                         else:
                             self._companion_name = 'Piglet'  # passive CSV fallback
                     logger.info(f"Companion identified: {self._companion_name}")
+
+                    # Rescue any WiGLE header lines from the boot buffer so the
+                    # column map gets built before the first data rows arrive.
+                    if self._companion_name == 'Piglet' and boot_buf:
+                        for bline in boot_buf.splitlines():
+                            bline = bline.strip()
+                            if bline:
+                                self._parse_serial_line(bline)
                 except Exception as e:
                     logger.debug(f"Companion identify error: {e}")
                     self._companion_name = 'Companion'  # Unknown fallback
@@ -2916,7 +2924,6 @@ class WardrivingEngine:
                 while self._running:
                     # Send next scan command
                     cmd, duration, scan_type = scan_cycle[cycle_index % len(scan_cycle)]
-                    self._current_esp_mode = scan_type
                     try:
                         ser.write(b"stop\r\n")
                         time.sleep(0.3)
@@ -3070,6 +3077,10 @@ class WardrivingEngine:
 
         # === Pineapple / Evil Twin / Skimmer detection ===
         if 'Pineapple detected' in line or 'POTENTIAL SKIMMER' in line or 'Evil Twin' in line:
+            if 'POTENTIAL SKIMMER' in line:
+                self._current_esp_mode = 'ble-skimmer'
+            else:
+                self._current_esp_mode = 'pineap'
             logger.warning(f"[HuginnESP ALERT] {line}")
             if not hasattr(self, '_esp_alerts'):
                 self._esp_alerts = []
@@ -3116,6 +3127,7 @@ class WardrivingEngine:
 
         # === AirTag detection (multi-line) ===
         if line.startswith('AirTag found'):
+            self._current_esp_mode = 'ble-all'
             self._esp_airtag_buffer = {}
             return
         if hasattr(self, '_esp_airtag_buffer') and self._esp_airtag_buffer is not None:
@@ -3152,6 +3164,7 @@ class WardrivingEngine:
             line
         )
         if flipper_match:
+            self._current_esp_mode = 'ble-filtered'
             self._esp_flipper_buffer = {'color': flipper_match.group(1)}
             return
         if hasattr(self, '_esp_flipper_buffer') and self._esp_flipper_buffer:
@@ -3178,6 +3191,7 @@ class WardrivingEngine:
 
         # === BLE spam detection ===
         if 'BLE Spam detected' in line:
+            self._current_esp_mode = 'ble-all'
             logger.warning(f"[HuginnESP] {line}")
             if not hasattr(self, '_esp_alerts'):
                 self._esp_alerts = []
@@ -3194,6 +3208,7 @@ class WardrivingEngine:
             line
         )
         if ble_match:
+            self._current_esp_mode = 'ble-all'
             mac = ble_match.group(1).upper()
             name = ble_match.group(2).strip().rstrip(',')
             rssi = int(ble_match.group(3))
@@ -3225,9 +3240,11 @@ class WardrivingEngine:
                     alt = float(alt)
 
                 if record_type in ('BT', 'BLE', 'BLUETOOTH'):
+                    self._current_esp_mode = 'ble-all'
                     self.session.upsert_bluetooth(mac, ssid, rssi, 'BLE', lat, lon, alt)
                     self._esp_ble_count += 1
                 else:
+                    self._current_esp_mode = 'wifi'
                     freq = 0
                     if channel:
                         freq = (2407 + channel * 5) if channel <= 14 else (5000 + channel * 5)
@@ -3252,6 +3269,7 @@ class WardrivingEngine:
         #      Security: WPA2
         entry_start = re.match(r'^\[(\d+)\]\s*SSID:\s*(.*?)(?:,\s*)?$', line)
         if entry_start:
+            self._current_esp_mode = 'wifi'
             # Flush previous buffered entry if exists
             if self._serial_entry_buffer.get('bssid'):
                 self._flush_serial_entry(gps_lat, gps_lon, gps_alt)
@@ -3284,6 +3302,7 @@ class WardrivingEngine:
         if line.startswith('WigleWifi-'):
             # Piglet v2.5 emits WigleWifi-1.6; older firmware emits 1.4. The
             # next non-empty line will be the column-name row.
+            self._current_esp_mode = 'wifi'
             self._wigle_expect_header = True
             self._wigle_col_map = None  # reset — about to receive fresh header
             return
@@ -3344,6 +3363,26 @@ class WardrivingEngine:
             'alt': 8, 'acc': 9, 'type': 10,
         }
 
+        # Auto-detect WiGLE 1.6 column shift: Piglet v2.5+ inserts a
+        # Frequency column between Channel (4) and RSSI (5→6), pushing
+        # every subsequent field right by one.  WiFi RSSI is always
+        # negative (dBm), so a positive value at the legacy RSSI position
+        # means it's actually a frequency.  Promote to 1.6 layout once
+        # and cache it so all subsequent rows parse correctly.
+        if not self._wigle_col_map and len(parts) > 11:
+            try:
+                probe = int(parts[5].strip())
+            except (ValueError, TypeError):
+                probe = -80
+            if probe > 0:
+                cm = {
+                    'mac': 0, 'ssid': 1, 'auth': 2, 'firstseen': 3,
+                    'channel': 4, 'frequency': 5, 'rssi': 6, 'lat': 7,
+                    'lon': 8, 'alt': 9, 'acc': 10, 'type': 11,
+                }
+                self._wigle_col_map = cm
+                logger.info("Auto-detected WiGLE 1.6 layout (Frequency column at position 5)")
+
         def _field(name, default=''):
             idx = cm.get(name)
             if idx is None or idx >= len(parts):
@@ -3379,6 +3418,7 @@ class WardrivingEngine:
         record_type = (_field('type') or 'WIFI').upper()
 
         if record_type in ('BT', 'BLE'):
+            self._current_esp_mode = 'ble-all'
             self.session.upsert_bluetooth(mac, ssid, rssi, 'BLE', lat, lon, alt)
         elif record_type in ('GSM', 'CDMA', 'LTE', 'UMTS', 'CELL'):
             self.session.upsert_cell_tower(
@@ -3386,6 +3426,7 @@ class WardrivingEngine:
                 signal_dbm=rssi, lat=lat, lon=lon
             )
         else:
+            self._current_esp_mode = 'wifi'
             is_new = self.session.upsert_network(
                 bssid=mac, ssid=ssid, security=auth,
                 channel=channel, frequency=freq, rssi=rssi,
