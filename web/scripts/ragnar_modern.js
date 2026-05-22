@@ -2961,24 +2961,26 @@ function _renderThreatFindings(data, panel) {
         : `Interface: ${escapeHtml(data.interface || '?')} · Connected to "${escapeHtml(data.own_network || '?')}"`;
 
     panel.innerHTML = `
-        <div class="flex items-center justify-between mb-3">
-            <div class="flex items-center space-x-2">
+        <div class="flex flex-wrap items-start justify-between gap-2 mb-3">
+            <div class="flex items-center space-x-2 min-w-0">
                 <span class="${colors.text} text-lg">⚠</span>
                 <span class="${colors.text} text-sm font-bold">${total} threat${total > 1 ? 's' : ''} detected in WiFi airspace</span>
             </div>
-            <div class="flex items-center space-x-2">
+            <div class="flex items-center space-x-2 shrink-0">
                 ${data.sweep_count != null ? '<button onclick="clearThreatMonitorFindings()" class="text-gray-500 hover:text-gray-300 text-xs mr-2">clear</button>' : ''}
                 <button onclick="document.getElementById('threat-sweep-results').classList.add('hidden')" class="text-gray-500 hover:text-gray-300 text-xs">dismiss</button>
             </div>
         </div>
-        <table class="w-full text-left">
-            <thead><tr class="border-b border-slate-700 text-xs text-gray-500">
-                <th class="pb-1 pr-3">Severity</th><th class="pb-1 pr-3">Type</th>
-                <th class="pb-1 pr-3">SSID</th><th class="pb-1 pr-3">BSSID</th>
-                <th class="pb-1 pr-3">Signal</th><th class="pb-1">Description</th>
-            </tr></thead>
-            <tbody>${rows}</tbody>
-        </table>
+        <div class="overflow-x-auto -mx-2 sm:mx-0">
+            <table class="w-full text-left min-w-[520px]">
+                <thead><tr class="border-b border-slate-700 text-xs text-gray-500">
+                    <th class="pb-1 pr-3 pl-2 sm:pl-0">Severity</th><th class="pb-1 pr-3">Type</th>
+                    <th class="pb-1 pr-3">SSID</th><th class="pb-1 pr-3">BSSID</th>
+                    <th class="pb-1 pr-3">Signal</th><th class="pb-1">Description</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
         <p class="text-xs text-gray-500 mt-2">${escapeHtml(sweepInfo)}</p>`;
 }
 
@@ -15919,15 +15921,15 @@ async function loadWardrivingNetworks() {
                 : '<span class="text-gray-600">—</span>';
             const camIcon = n.is_camera ? '<span class="text-pink-400">📷</span>' : '';
             return `<tr class="hover:bg-slate-800/50">
-                <td class="px-3 py-1.5 font-mono text-xs">${escapeHtml(ssid)}</td>
-                <td class="px-3 py-1.5 font-mono text-xs text-gray-400">${n.bssid}</td>
-                <td class="px-3 py-1.5 text-xs ${secColor}">${n.security || 'Open'}</td>
-                <td class="px-3 py-1.5 text-xs text-center">${n.channel || '-'}</td>
-                <td class="px-3 py-1.5 text-xs">${n.band || '-'}</td>
-                <td class="px-3 py-1.5 text-xs ${sigColor}">${n.best_rssi} dBm</td>
-                <td class="px-3 py-1.5 text-xs text-center">${camIcon}</td>
-                <td class="px-3 py-1.5 text-xs text-center">${gpsIcon}</td>
-                <td class="px-3 py-1.5 text-xs text-gray-400">${n.scan_count || 1}x</td>
+                <td class="px-3 py-1.5 font-mono text-xs" data-label="SSID">${escapeHtml(ssid)}</td>
+                <td class="px-3 py-1.5 font-mono text-xs text-gray-400" data-label="BSSID">${n.bssid}</td>
+                <td class="px-3 py-1.5 text-xs ${secColor}" data-label="Security">${n.security || 'Open'}</td>
+                <td class="px-3 py-1.5 text-xs text-center" data-label="Ch">${n.channel || '-'}</td>
+                <td class="px-3 py-1.5 text-xs" data-label="Band">${n.band || '-'}</td>
+                <td class="px-3 py-1.5 text-xs ${sigColor}" data-label="Signal">${n.best_rssi} dBm</td>
+                <td class="px-3 py-1.5 text-xs text-center" data-label="Camera">${camIcon || '—'}</td>
+                <td class="px-3 py-1.5 text-xs text-center" data-label="GPS">${gpsIcon}</td>
+                <td class="px-3 py-1.5 text-xs text-gray-400" data-label="Seen">${n.scan_count || 1}x</td>
             </tr>`;
         }).join('');
 
@@ -15963,13 +15965,13 @@ async function _loadWardrivingBluetooth() {
                 : '<span class="text-gray-600">—</span>';
             const sigColor = d.rssi > -50 ? 'text-emerald-400' : d.rssi > -70 ? 'text-yellow-400' : 'text-red-400';
             return `<tr class="hover:bg-slate-800/50">
-                <td class="px-3 py-1.5 font-mono text-xs">${escapeHtml(d.name || '(unknown)')}</td>
-                <td class="px-3 py-1.5 font-mono text-xs text-gray-400">${d.mac}</td>
-                <td class="px-3 py-1.5 text-xs text-orange-400">${d.device_type || '-'}</td>
-                <td class="px-3 py-1.5 text-xs ${sigColor}">${d.rssi || '-'} dBm</td>
-                <td class="px-3 py-1.5 text-xs text-center">${gpsIcon}</td>
-                <td class="px-3 py-1.5 text-xs text-gray-400">${d.first_seen || '-'}</td>
-                <td class="px-3 py-1.5 text-xs text-gray-400">${d.scan_count || 1}x</td>
+                <td class="px-3 py-1.5 font-mono text-xs" data-label="Name">${escapeHtml(d.name || '(unknown)')}</td>
+                <td class="px-3 py-1.5 font-mono text-xs text-gray-400" data-label="MAC">${d.mac}</td>
+                <td class="px-3 py-1.5 text-xs text-orange-400" data-label="Type">${d.device_type || '-'}</td>
+                <td class="px-3 py-1.5 text-xs ${sigColor}" data-label="RSSI">${d.rssi || '-'} dBm</td>
+                <td class="px-3 py-1.5 text-xs text-center" data-label="GPS">${gpsIcon}</td>
+                <td class="px-3 py-1.5 text-xs text-gray-400" data-label="First Seen">${d.first_seen || '-'}</td>
+                <td class="px-3 py-1.5 text-xs text-gray-400" data-label="Seen">${d.scan_count || 1}x</td>
             </tr>`;
         }).join('');
         _wdSetTbodyHTML(tbody, html);
@@ -16003,14 +16005,14 @@ async function _loadWardrivingCellTable() {
                 : '<span class="text-gray-600">—</span>';
             const sigColor = t.signal_dbm > -70 ? 'text-emerald-400' : t.signal_dbm > -90 ? 'text-yellow-400' : 'text-red-400';
             return `<tr class="hover:bg-slate-800/50">
-                <td class="px-3 py-1.5 text-xs text-fuchsia-400">${escapeHtml(t.provider || '-')}</td>
-                <td class="px-3 py-1.5 text-xs">${t.tech || '-'}</td>
-                <td class="px-3 py-1.5 font-mono text-xs text-gray-400">${t.cell_id || '-'}</td>
-                <td class="px-3 py-1.5 text-xs">${t.mcc || '-'}/${t.mnc || '-'}</td>
-                <td class="px-3 py-1.5 text-xs ${sigColor}">${t.signal_dbm || '-'} dBm</td>
-                <td class="px-3 py-1.5 text-xs">${t.band_freq || '-'}</td>
-                <td class="px-3 py-1.5 text-xs text-center">${gpsIcon}</td>
-                <td class="px-3 py-1.5 text-xs text-gray-400">${t.scan_count || 1}x</td>
+                <td class="px-3 py-1.5 text-xs text-fuchsia-400" data-label="Provider">${escapeHtml(t.provider || '-')}</td>
+                <td class="px-3 py-1.5 text-xs" data-label="Tech">${t.tech || '-'}</td>
+                <td class="px-3 py-1.5 font-mono text-xs text-gray-400" data-label="Cell ID">${t.cell_id || '-'}</td>
+                <td class="px-3 py-1.5 text-xs" data-label="MCC/MNC">${t.mcc || '-'}/${t.mnc || '-'}</td>
+                <td class="px-3 py-1.5 text-xs ${sigColor}" data-label="Signal">${t.signal_dbm || '-'} dBm</td>
+                <td class="px-3 py-1.5 text-xs" data-label="Band">${t.band_freq || '-'}</td>
+                <td class="px-3 py-1.5 text-xs text-center" data-label="GPS">${gpsIcon}</td>
+                <td class="px-3 py-1.5 text-xs text-gray-400" data-label="Seen">${t.scan_count || 1}x</td>
             </tr>`;
         }).join('');
         _wdSetTbodyHTML(tbody, html);
@@ -16047,14 +16049,14 @@ async function _loadWardrivingCameras() {
                 ? `<span title="${n.best_lat.toFixed(5)}, ${n.best_lon.toFixed(5)}" class="text-emerald-400 cursor-help">📍</span>`
                 : '<span class="text-gray-600">—</span>';
             return `<tr class="hover:bg-slate-800/50">
-                <td class="px-3 py-1.5 font-mono text-xs text-pink-400">${escapeHtml(n.ssid || '<hidden>')} 📷</td>
-                <td class="px-3 py-1.5 font-mono text-xs text-gray-400">${n.bssid}</td>
-                <td class="px-3 py-1.5 text-xs ${secColor}">${n.security || 'Open'}</td>
-                <td class="px-3 py-1.5 text-xs text-center">${n.channel || '-'}</td>
-                <td class="px-3 py-1.5 text-xs">${n.band || '-'}</td>
-                <td class="px-3 py-1.5 text-xs ${sigColor}">${n.best_rssi} dBm</td>
-                <td class="px-3 py-1.5 text-xs text-center">${gpsIcon}</td>
-                <td class="px-3 py-1.5 text-xs text-gray-400">${n.scan_count || 1}x</td>
+                <td class="px-3 py-1.5 font-mono text-xs text-pink-400" data-label="SSID">${escapeHtml(n.ssid || '<hidden>')} 📷</td>
+                <td class="px-3 py-1.5 font-mono text-xs text-gray-400" data-label="BSSID">${n.bssid}</td>
+                <td class="px-3 py-1.5 text-xs ${secColor}" data-label="Security">${n.security || 'Open'}</td>
+                <td class="px-3 py-1.5 text-xs text-center" data-label="Ch">${n.channel || '-'}</td>
+                <td class="px-3 py-1.5 text-xs" data-label="Band">${n.band || '-'}</td>
+                <td class="px-3 py-1.5 text-xs ${sigColor}" data-label="Signal">${n.best_rssi} dBm</td>
+                <td class="px-3 py-1.5 text-xs text-center" data-label="GPS">${gpsIcon}</td>
+                <td class="px-3 py-1.5 text-xs text-gray-400" data-label="Seen">${n.scan_count || 1}x</td>
             </tr>`;
         }).join('');
         _wdSetTbodyHTML(tbody, html);
@@ -16083,15 +16085,15 @@ function renderWardrivingSessions(sessions) {
             if (!isNaN(d.getTime())) dateStr = d.toLocaleString();
         }
         return `
-        <div class="flex flex-wrap items-center justify-between ${activeClass} rounded-lg px-4 py-2 gap-2 cursor-pointer hover:bg-slate-700/50 transition-colors" onclick="selectWardrivingSession('${s.session_id}')">
-            <div>
-                <span class="text-sm font-mono text-gray-300">${dateStr}</span>
-                <span class="text-xs text-gray-500 ml-2">${s.total_networks || 0} networks</span>
-                ${isActive ? '<span class="text-xs text-cyan-400 ml-2">● viewing</span>' : ''}
+        <div class="flex flex-wrap items-center justify-between ${activeClass} rounded-lg px-3 sm:px-4 py-2 gap-x-3 gap-y-1 cursor-pointer hover:bg-slate-700/50 transition-colors" onclick="selectWardrivingSession('${s.session_id}')">
+            <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 min-w-0 flex-1">
+                <span class="text-sm font-mono text-gray-300 break-all">${dateStr}</span>
+                <span class="text-xs text-gray-500">${s.total_networks || 0} networks</span>
+                ${isActive ? '<span class="text-xs text-cyan-400">● viewing</span>' : ''}
             </div>
-            <div class="flex gap-2">
-                <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=wigle" class="text-xs text-cyan-400 hover:text-cyan-300" onclick="event.stopPropagation()">WiGLE CSV</a>
-                <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=kml" class="text-xs text-purple-400 hover:text-purple-300" onclick="event.stopPropagation()">KML</a>
+            <div class="flex gap-3 shrink-0">
+                <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=wigle" class="text-xs text-cyan-400 hover:text-cyan-300 whitespace-nowrap" onclick="event.stopPropagation()">WiGLE CSV</a>
+                <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=kml" class="text-xs text-purple-400 hover:text-purple-300 whitespace-nowrap" onclick="event.stopPropagation()">KML</a>
             </div>
         </div>`;
     }).join('');

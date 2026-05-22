@@ -215,6 +215,55 @@
                 width: 100%;
             }
         }
+
+        /* Responsive layout for wardriving table on phones */
+        @media (max-width: 640px) {
+            #wardriving-tab table,
+            #wardriving-tab tbody,
+            #wardriving-tab tr,
+            #wardriving-tab td {
+                display: block;
+                width: 100%;
+            }
+
+            #wardriving-tab thead {
+                display: none;
+            }
+
+            #wardriving-tab #wd-network-table > tr {
+                border: 1px solid rgba(148, 163, 184, 0.18);
+                border-radius: 0.5rem;
+                padding: 0.5rem 0.75rem;
+                margin-bottom: 0.75rem;
+                background: rgba(15, 23, 42, 0.35);
+            }
+
+            #wardriving-tab #wd-network-table > tr > td {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 0.75rem;
+                padding: 0.25rem 0;
+                text-align: left !important;
+            }
+
+            #wardriving-tab #wd-network-table > tr > td::before {
+                content: attr(data-label);
+                font-weight: 600;
+                text-transform: uppercase;
+                color: rgba(226, 232, 240, 0.7);
+                font-size: 0.65rem;
+                letter-spacing: 0.04em;
+                flex: 0 0 auto;
+            }
+
+            #wardriving-tab #wd-network-table > tr > td:not([data-label]) {
+                /* "No networks yet" placeholder spans full width */
+                display: block;
+                text-align: center !important;
+            }
+        }
+
         /* Toggle switch: show green when ON, regardless of Tailwind purge state */
         label.toggle-switch > input[type="checkbox"]:checked + div { background-color: #16a34a !important; }
         /* AI map toggle – uses Ragnar color, not green */
@@ -864,14 +913,14 @@
             </div>
 
             <!-- External Threat Detection Card -->
-            <div class="glass rounded-xl p-6 mb-6">
-                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-4">
-                    <div>
-                        <h2 class="text-xl font-semibold mb-1">External Threat Detection</h2>
+            <div class="glass rounded-xl p-4 sm:p-6 mb-6">
+                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+                    <div class="min-w-0">
+                        <h2 class="text-lg sm:text-xl font-semibold mb-1">External Threat Detection</h2>
                         <p class="text-sm text-gray-400">Scan WiFi airspace for rogue access points, evil twins, deauth attacks, and suspicious devices</p>
                         <span id="monitor-mode-badge" class="hidden inline-flex items-center mt-1 text-xs font-medium px-2 py-0.5 rounded-full"></span>
                     </div>
-                    <div class="flex items-center space-x-3 mt-3 sm:mt-0">
+                    <div class="flex flex-wrap items-center gap-3">
                         <button id="threat-sweep-btn"
                                 onclick="runThreatSweep()"
                                 class="bg-red-700 hover:bg-red-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap flex items-center space-x-2">
@@ -880,7 +929,7 @@
                             </svg>
                             <span>Scan Now</span>
                         </button>
-                        <div class="flex items-center space-x-3 border-l border-slate-700 pl-3">
+                        <div class="flex flex-wrap items-center gap-x-3 gap-y-1 w-full sm:w-auto sm:border-l border-slate-700 sm:pl-3 pt-2 sm:pt-0 border-t sm:border-t-0">
                             <span class="text-sm text-gray-300 font-medium">Continuous</span>
                             <label class="toggle-switch relative inline-flex items-center cursor-pointer">
                                 <input type="checkbox" id="threat-monitor-toggle" class="sr-only peer" onchange="toggleThreatMonitor()">
@@ -3857,7 +3906,7 @@
                 <div id="wd-adapters-bar" class="hidden mb-4"></div>
 
                 <!-- Table Type Selector -->
-                <div class="bg-slate-800/30 rounded-lg px-4 py-2 mb-4 flex items-center gap-3">
+                <div class="bg-slate-800/30 rounded-lg px-3 sm:px-4 py-2 mb-4 flex flex-wrap items-center gap-x-3 gap-y-1">
                     <label class="text-xs text-gray-400">View:</label>
                     <select id="wd-table-type" onchange="loadWardrivingTableByType()" class="bg-slate-700 text-white text-xs rounded px-2 py-1 border border-slate-600">
                         <option value="wifi" selected>📶 WiFi Networks</option>
@@ -3865,7 +3914,7 @@
                         <option value="cell">📶 Cell Towers</option>
                         <option value="cameras">📷 Cameras</option>
                     </select>
-                    <span id="wd-interfaces-info" class="text-xs text-gray-500 ml-auto"></span>
+                    <span id="wd-interfaces-info" class="text-xs text-gray-500 w-full sm:w-auto sm:ml-auto"></span>
                 </div>
 
                 <!-- Map Container (hidden by default) -->
