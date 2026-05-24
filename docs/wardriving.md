@@ -327,6 +327,7 @@ Falls back to linear when either endpoint speed is NULL or both are zero. The ch
   "serial_port": "/dev/ttyACM0",
   "serial_networks": 75,
   "serial_unique": 62,
+  "serial_seen_unique": 70,
   "esp_mode": "wardrive",
   "esp_ble_count": 87,
   "esp_alerts": [

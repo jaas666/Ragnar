@@ -15140,9 +15140,9 @@ function updateWardrivingUI(status) {
             updateElement('wd-esp-port', status.serial_port || '');
 
             // Piglet / Piglet Coordinator: WiFi-only, no on-device BLE
-            // reporting, no scan mode switching. Hide the Mode / BLE / Unique
-            // chips and use the WiFi label for total records (for Coordinator)
-            // or kept as serial_networks (for plain Piglet).
+            // reporting, no scan mode switching. Hide Mode / BLE chips.
+            // Plain Piglet hides Unique too; the Coordinator keeps Unique
+            // and gains an extra WiFi chip (distinct BSSIDs the mesh saw).
             const compName = status.companion_name || '';
             const isPiglet = compName === 'Piglet' || compName === 'Piglet Coordinator';
             const isCoord  = compName === 'Piglet Coordinator';
@@ -15151,13 +15151,16 @@ function updateWardrivingUI(status) {
                 if (!el) return;
                 el.classList.toggle('hidden', hidden);
             };
-            toggle('wd-esp-mode-wrapper',   isPiglet);
-            toggle('wd-esp-ble-wrapper',    isPiglet);
-            toggle('wd-esp-unique-wrapper', isPiglet);
+            toggle('wd-esp-mode-wrapper',       isPiglet);
+            toggle('wd-esp-ble-wrapper',        isPiglet);
+            toggle('wd-esp-unique-wrapper',     isPiglet && !isCoord);
+            toggle('wd-esp-coord-wifi-wrapper', !isCoord);
 
-            // WiFi counter — for the Coordinator, sum records contributed by
-            // all mesh nodes (matches the per-node bar below). For plain
-            // Piglet / Huginn, fall back to serial_networks.
+            // WiFi counter — for the Coordinator, the leading number is the
+            // sum of records contributed by all mesh nodes (matches the
+            // per-node bar below) and the extra "WiFi:" chip shows distinct
+            // BSSIDs. For plain Piglet / Huginn, the leading number stays as
+            // the running serial_networks counter.
             const netLabelEl = document.getElementById('wd-esp-net-label');
             if (isCoord) {
                 const nodes = Array.isArray(status.coordinator_nodes)
@@ -15165,6 +15168,8 @@ function updateWardrivingUI(status) {
                 const totalRx = nodes.reduce((a, n) => a + (n.records_rx || 0), 0);
                 updateElement('wd-esp-net-count', String(totalRx));
                 if (netLabelEl) netLabelEl.textContent = 'Records:';
+                updateElement('wd-esp-coord-wifi-count',
+                    String(status.serial_seen_unique || 0));
             } else {
                 updateElement('wd-esp-net-count', String(status.serial_networks || 0));
                 if (netLabelEl) netLabelEl.textContent = 'WiFi:';

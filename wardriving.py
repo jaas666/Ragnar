@@ -1873,9 +1873,22 @@ class WardrivingEngine:
             result['stats'] = self.session.get_stats()
             try:
                 with sqlite3.connect(self.session.db_path) as conn:
-                    # Unique ESP32-only networks (found by esp32-serial but not by wlan)
+                    # Total distinct networks the ESP serial side ever observed.
+                    # Sourced from network_observations so we catch every BSSID
+                    # the companion saw, not only the ones it was first to log.
                     row = conn.execute(
-                        "SELECT COUNT(DISTINCT bssid) FROM networks WHERE interface='esp32-serial'"
+                        "SELECT COUNT(DISTINCT bssid) FROM network_observations "
+                        "WHERE interface='esp32-serial'"
+                    ).fetchone()
+                    result['serial_seen_unique'] = row[0] if row else 0
+                    # ESP-only networks: BSSIDs seen by esp32-serial that no
+                    # local wlan adapter ever saw. Used by the "Unique" chip.
+                    row = conn.execute(
+                        "SELECT COUNT(DISTINCT o.bssid) FROM network_observations o "
+                        "WHERE o.interface='esp32-serial' AND NOT EXISTS ("
+                        "  SELECT 1 FROM network_observations o2 "
+                        "  WHERE o2.bssid = o.bssid AND o2.interface != 'esp32-serial'"
+                        ")"
                     ).fetchone()
                     result['serial_unique'] = row[0] if row else 0
                     # Unique BLE devices detected via Huginn (overrides running line counter
@@ -1890,6 +1903,7 @@ class WardrivingEngine:
                         pass
             except Exception:
                 result['serial_unique'] = 0
+                result['serial_seen_unique'] = 0
         return result
 
     def get_session_list(self):
