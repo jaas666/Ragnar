@@ -459,28 +459,42 @@ Google Earth format with network positions as markers.
 
 ## Setup
 
-### 1. Flash HuginnESP
+### 1. Pick (and flash) a companion — optional
 
-```bash
-cd HuginnESP
-pio run --target upload     # COM8 on Windows, /dev/ttyACM* on Linux
-```
+You only need a companion for modes 2–5. Standalone mode (1) works without one.
+
+| Mode | Companion | Flash with |
+|------|-----------|-----------|
+| 2 | HuginnESP | `cd HuginnESP && pio run --target upload` (COM8 on Windows, `/dev/ttyACM*` on Linux) |
+| 3 | Piglet (plain) | Piglet's own flasher / Arduino IDE — see the [Piglet repo](https://github.com/Hamspiced/piglet) |
+| 4 | Piglet Coordinator (dedicated) | Browser-flash from [pierregode.github.io/Ragnar/](https://pierregode.github.io/Ragnar/) |
+| 5 | Piglet Core | Flash Piglet as in mode 3, then set `meshModeOnBoot=core` in `wardriver.cfg` |
 
 ### 2. Connect to Ragnar
 
 **Auto-detect (Linux):**
-Click 🔍 Search in the web UI — finds the ESP32 automatically via `udevadm`.
+Click 🔍 Search in the web UI — finds the ESP32 automatically via `udevadm`,
+regardless of which companion firmware is on it.
 
 **Manual:**
 Enter the port (`/dev/ttyACM0` or `COM8`) in the serial field and click Connect.
+
+The serial card's companion label updates from `Companion` → `Huginn` /
+`Piglet` / `Piglet Coordinator` once the boot banner is parsed.
 
 ### 3. GPS (optional)
 
 Connect a USB GPS receiver. Ragnar auto-detects NMEA devices.
 
+In modes 3 and 5 the Piglet board itself has a GPS module — those positions
+ride along inside the WigleWifi CSV rows, so Ragnar's own GPS is optional but
+recommended (it backfills network observations made during Piglet dropouts).
+In modes 2 and 4 the companion has no GPS, so Ragnar's GPS is the only source.
+
 ### 4. Start Wardriving
 
-Click **Start Wardriving** in the web UI. Ragnar begins scanning with all active interfaces + ESP32 serial.
+Click **Start Wardriving** in the web UI. Ragnar begins scanning with all
+active wlan interfaces and ingesting whatever is on the serial port.
 
 ---
 
@@ -676,10 +690,70 @@ While in Mesh Node mode the OLED shows:
 
 | Role | Recommended Board | Notes |
 |------|-------------------|-------|
-| Core | XIAO ESP32-C5 | 2.4 + 5 GHz, needs GPS + SD |
-| Core | XIAO ESP32-S3 | 2.4 GHz only, needs GPS + SD |
+| Core (mode 5) | XIAO ESP32-C5 | 2.4 + 5 GHz, needs GPS + SD |
+| Core (mode 5) | XIAO ESP32-S3 | 2.4 GHz only, needs GPS + SD |
+| Coordinator (mode 4) | Waveshare ESP32-C5-WIFI6-KIT | Headless, uses Ragnar's GPS — no SD card needed |
+| Coordinator (mode 4) | Waveshare ESP32-S3-Touch-LCD-4B | 480×480 display showing live mesh stats |
 | Node | Any supported XIAO | No GPS or SD required |
 | Node | LilyGo T-Dongle C5 | Compact node with built-in TFT |
+
+---
+
+### Piglet Coordinator firmware (mode 4) — dedicated coordinator
+
+The `espnow_bridge_firmware/` directory ships two builds of a purpose-built
+coordinator firmware (one for ESP32-C5, one for ESP32-S3-Touch-LCD-4B). It
+replaces Piglet's Core role with a thinner, USB-tethered bridge:
+
+- No local WiFi scan, no SD card, no GPS dependency on the ESP — Ragnar
+  handles all of that.
+- Receives `MSG_NODE_REPORT` frames from every paired Piglet on ESP-Now
+  channel 6, distributes the 40-entry scan-channel table evenly across the
+  nodes, and forwards each record to Ragnar over USB CDC at 460800 baud.
+- Announces itself on boot with
+  `{"device":"RagnarCoord","fw":"<build>","board":"<board>","caps":["espnow","piglet-core"]}`
+  so Ragnar can flip the companion identity to `Piglet Coordinator` and adjust
+  the UI accordingly.
+- Emits one `{"type":"WIFI",...}` JSON line per record and one
+  `{"type":"NODE",...}` row per active mesh node every ~10 s (used by Ragnar
+  to render the per-node breakdown bar with each node's MAC, records-rx, and
+  age-since-last-update).
+- The S3-LCD build also draws live mesh stats on its 480×480 panel.
+
+#### Flashing
+
+Browser-flash either board at
+[pierregode.github.io/Ragnar/](https://pierregode.github.io/Ragnar/) — pick the
+matching board, plug it into Ragnar over USB-C, click Forge. The GitHub Actions
+workflow rebuilds both binaries on every `main` push and redeploys the pages
+site.
+
+#### Status integration
+
+When a Piglet Coordinator is connected, the `/api/wardriving/status` payload
+includes:
+
+```json
+"companion_name": "Piglet Coordinator",
+"coordinator_board": "ESP32-C5",
+"coordinator_fw": "c5-1",
+"mesh_node_count": 1,
+"coordinator_nodes": [
+  {"mac": "AA:BB:CC:DD:EE:FF", "idx": 0, "records_rx": 4637, "age_s": 3}
+]
+```
+
+The wardriving card shows:
+
+```
+Piglet Coordinator · /dev/ttyACM0 · Records: 4637 | WiFi: 70 · Unique: 8 | Mesh: 1 nodes
+```
+
+where **Records** is total mesh records relayed (sum of every node's
+`records_rx`), **WiFi** is the count of distinct BSSIDs the mesh side has
+ever observed (`serial_seen_unique`), **Unique** is BSSIDs only the mesh
+saw — never picked up by Ragnar's local wlan adapters (`serial_unique`), and
+**Mesh** is the live node count.
 
 ### Tips
 
