@@ -15138,9 +15138,40 @@ function updateWardrivingUI(status) {
             if (details) details.style.display = '';
             if (labelEl) labelEl.textContent = status.companion_name || 'Companion';
             updateElement('wd-esp-port', status.serial_port || '');
-            updateElement('wd-esp-net-count', String(status.serial_networks || 0));
+
+            // Piglet / Piglet Coordinator: WiFi-only, no on-device BLE
+            // reporting, no scan mode switching. Hide the Mode / BLE / Unique
+            // chips and use the WiFi label for total records (for Coordinator)
+            // or kept as serial_networks (for plain Piglet).
+            const compName = status.companion_name || '';
+            const isPiglet = compName === 'Piglet' || compName === 'Piglet Coordinator';
+            const isCoord  = compName === 'Piglet Coordinator';
+            const toggle = (id, hidden) => {
+                const el = document.getElementById(id);
+                if (!el) return;
+                el.classList.toggle('hidden', hidden);
+            };
+            toggle('wd-esp-mode-wrapper',   isPiglet);
+            toggle('wd-esp-ble-wrapper',    isPiglet);
+            toggle('wd-esp-unique-wrapper', isPiglet);
+
+            // WiFi counter — for the Coordinator, sum records contributed by
+            // all mesh nodes (matches the per-node bar below). For plain
+            // Piglet / Huginn, fall back to serial_networks.
+            const netLabelEl = document.getElementById('wd-esp-net-label');
+            if (isCoord) {
+                const nodes = Array.isArray(status.coordinator_nodes)
+                    ? status.coordinator_nodes : [];
+                const totalRx = nodes.reduce((a, n) => a + (n.records_rx || 0), 0);
+                updateElement('wd-esp-net-count', String(totalRx));
+                if (netLabelEl) netLabelEl.textContent = 'Records:';
+            } else {
+                updateElement('wd-esp-net-count', String(status.serial_networks || 0));
+                if (netLabelEl) netLabelEl.textContent = 'WiFi:';
+            }
             updateElement('wd-esp-unique', String(status.serial_unique || 0));
-            // Show current scan mode and BLE count
+
+            // Show current scan mode and BLE count (only relevant for Huginn)
             const modeEl = document.getElementById('wd-esp-mode');
             if (modeEl) {
                 const modeLabels = {
@@ -15162,6 +15193,8 @@ function updateWardrivingUI(status) {
                     meshWrapper.classList.add('hidden');
                 }
             }
+            // Piglet Coordinator: per-node breakdown
+            _renderCoordinatorNodes(status);
             // Show alerts
             const alertEl = document.getElementById('wd-esp-alerts');
             if (alertEl && status.esp_alerts && status.esp_alerts.length > 0) {
@@ -15186,6 +15219,58 @@ function updateWardrivingUI(status) {
 
     // Serial ESP32 config card
     updateSerialStatus(status);
+}
+
+// Render the per-node breakdown bar for the Piglet Coordinator firmware.
+// Each node shows its short MAC (last 4 bytes) + records contributed +
+// age in seconds (stale > 30 s goes orange, > 60 s grey).
+function _renderCoordinatorNodes(status) {
+    const bar  = document.getElementById('wd-coord-nodes-bar');
+    const list = document.getElementById('wd-coord-nodes-list');
+    if (!bar || !list) return;
+    const nodes = status && Array.isArray(status.coordinator_nodes)
+        ? status.coordinator_nodes : [];
+    if (nodes.length === 0) {
+        bar.classList.add('hidden');
+        list.innerHTML = '';
+        return;
+    }
+    bar.classList.remove('hidden');
+    // Header counts
+    const total = nodes.length;
+    const totalRx = nodes.reduce((a, n) => a + (n.records_rx || 0), 0);
+    const countEl = document.getElementById('wd-coord-nodes-count');
+    if (countEl) countEl.textContent =
+        `${total} connected — ${totalRx.toLocaleString()} records total`;
+    const boardEl = document.getElementById('wd-coord-board');
+    if (boardEl) {
+        const parts = [];
+        if (status.coordinator_board) parts.push(status.coordinator_board);
+        if (status.coordinator_fw)    parts.push(status.coordinator_fw);
+        boardEl.textContent = parts.join(' · ');
+    }
+    // Render one chip per node
+    list.innerHTML = nodes.map(n => {
+        const mac   = (n.mac || '').toUpperCase();
+        const short = mac.length >= 5
+            ? mac.slice(-5)  // "XX:XX" last 4 hex chars + colon
+            : (mac || '?');
+        const rx    = (n.records_rx || 0).toLocaleString();
+        const age   = Number(n.age_s || 0);
+        let ageColor = 'text-emerald-400';
+        if (age > 60)      ageColor = 'text-gray-500';
+        else if (age > 30) ageColor = 'text-orange-400';
+        const idx = (n.idx !== undefined) ? `#${n.idx}` : '';
+        return `<span class="inline-flex items-center gap-2 bg-slate-900/60 border border-slate-700 rounded px-2 py-1">
+            <span class="text-xs font-bold text-purple-300">node ${idx}</span>
+            <span class="text-xs text-gray-400 font-mono">${mac}</span>
+            <span class="text-xs text-gray-500">·</span>
+            <span class="text-xs font-bold text-cyan-400">${rx}</span>
+            <span class="text-xs text-gray-500">rx</span>
+            <span class="text-xs text-gray-500">·</span>
+            <span class="text-xs ${ageColor}">${age}s</span>
+        </span>`;
+    }).join('');
 }
 
 function _renderWifiAdaptersBar(status) {

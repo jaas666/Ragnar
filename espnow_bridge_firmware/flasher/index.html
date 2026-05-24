@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ragnar — Coordinator Flasher (C5 / S3-LCD)</title>
+    <meta name="description" content="Flash the Ragnar ESP-Now Coordinator firmware to your ESP32-C5 (headless) or ESP32-S3-Touch-LCD-4B (with 480x480 display) directly from your browser." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Russo+One&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="css/style.css" />
+  </head>
+  <body>
+    <div class="page">
+
+      <!-- Header -->
+      <header class="site-header">
+        <div class="logo-mark">⚡</div>
+        <span class="brand">RAGNAR &mdash; <span>ESP-Now Coordinator</span></span>
+      </header>
+
+      <!-- Hero -->
+      <div class="hero-title">
+        <h1>Flash <span>Coordinator</span></h1>
+        <p class="tagline">Standalone Piglet Core &middot; ESP-Now mesh &middot; HuginnESP-compatible JSON output</p>
+        <p class="desc">
+          Two supported boards. Both pair automatically with Piglet nodes on channel&nbsp;6
+          and stream WiGLE/BLE records to Ragnar over USB serial as one-object-per-line JSON.
+        </p>
+      </div>
+
+      <!-- ───────── ESP32-C5 (headless) ───────── -->
+      <section class="flash-panel" id="coordinator-c5">
+        <h2>ESP32-C5 Coordinator (headless)</h2>
+        <p>
+          <strong>Waveshare ESP32-C5-WIFI6-KIT</strong> &middot; single-core RISC-V @240&nbsp;MHz,
+          16&nbsp;MB flash, 4&nbsp;MB PSRAM, dual-band Wi-Fi 6, BLE 5. No display.
+          Smallest/cheapest option &mdash; just plug into Ragnar's USB and it works.
+        </p>
+
+        <div class="prereq">
+          <div class="prereq-title">Before flashing</div>
+          <ol>
+            <li>Close Arduino IDE, Serial Monitor, or any other app using the serial port</li>
+            <li>Use a <strong>data-capable</strong> USB-C cable (not charge-only)</li>
+            <li>Click Flash and select <code>USB JTAG/serial debug unit</code> from the port list</li>
+            <li>If the board isn&rsquo;t detected, hold <strong>BOOT</strong> while pressing <strong>RST</strong></li>
+          </ol>
+        </div>
+
+        <div class="chip-badges">
+          <span class="chip-badge"><span class="dot"></span>Waveshare ESP32-C5-WIFI6-KIT</span>
+        </div>
+
+        <div class="flash-buttons">
+          <button class="btn-flash" onclick="flashDevice('manifest-coordinator-c5.json')">
+            ⚡ Flash C5 Coordinator
+          </button>
+        </div>
+      </section>
+
+      <!-- ───────── ESP32-S3-Touch-LCD-4B (display) ───────── -->
+      <section class="flash-panel" id="coordinator-s3-lcd">
+        <h2>ESP32-S3-Touch-LCD-4B Coordinator (480×480 display)</h2>
+        <p>
+          <strong>Waveshare ESP32-S3-Touch-LCD-4B</strong> &middot; dual-core LX7 @240&nbsp;MHz,
+          16&nbsp;MB flash, 8&nbsp;MB OPI PSRAM, 4&Prime; 480×480 RGB IPS touch panel.
+          Same coordinator firmware, plus a status UI on the built-in display
+          (nodes, networks seen, uptime, last RX).
+        </p>
+
+        <div class="prereq">
+          <div class="prereq-title">Before flashing</div>
+          <ol>
+            <li>Close Arduino IDE, Serial Monitor, or any other app using the serial port</li>
+            <li>Use a <strong>data-capable</strong> USB-C cable (not charge-only)</li>
+            <li>Click Flash and select <code>USB JTAG/serial debug unit</code> from the port list</li>
+            <li>If the board isn&rsquo;t detected, hold <strong>BOOT</strong> while pressing <strong>RST</strong></li>
+          </ol>
+        </div>
+
+        <div class="chip-badges">
+          <span class="chip-badge"><span class="dot"></span>Waveshare ESP32-S3-Touch-LCD-4B</span>
+        </div>
+
+        <div class="flash-buttons">
+          <button class="btn-flash" onclick="flashDevice('manifest-coordinator-s3-lcd.json')">
+            ⚡ Flash S3-LCD Coordinator
+          </button>
+        </div>
+      </section>
+
+      <!-- Shared serial monitor button -->
+      <section class="flash-panel" id="serial-tools">
+        <h2>📡 Serial Monitor</h2>
+        <p>
+          Open a browser-based serial monitor for any flashed coordinator.
+          Default baud is <code>460800</code>. Expect <code>[CORE]&nbsp;alive</code>
+          lines every 10&nbsp;s plus <code>{"type":"WIFI",...}</code> JSON rows when
+          paired Piglets are reporting.
+        </p>
+        <div class="flash-buttons">
+          <button class="btn-logs" onclick="openLogs()">📡 Open Serial Monitor</button>
+        </div>
+      </section>
+
+      <!-- Browser warning -->
+      <div id="browserWarn" class="browser-warn">
+        Web Serial is only available in Chromium-based browsers (Chrome, Edge, Opera) on desktop.
+        Firefox and Safari are not supported.
+      </div>
+
+      <!-- Footer -->
+      <footer class="footer">
+        <div>Channel: <code>6</code> &middot; Baud: <code>460800</code> &middot; Output: HuginnESP-style JSON</div>
+        <div>Build: <code id="build">&mdash;</code></div>
+        <div>
+          <a href="https://github.com/PierreGode/Ragnar" target="_blank" rel="noopener">Ragnar on GitHub</a>
+          &middot;
+          <a href="https://github.com/PierreGode/piglet" target="_blank" rel="noopener">Piglet Firmware</a>
+        </div>
+      </footer>
+
+    </div>
+
+    <!-- Serial monitor overlay -->
+    <div id="serial-overlay" class="flash-overlay" hidden>
+      <div class="flash-dialog serial-dialog">
+        <h3>📡 Serial Monitor</h3>
+        <div class="serial-baud">
+          <label for="serial-baud-select">Baud:</label>
+          <select id="serial-baud-select">
+            <option value="9600">9600</option>
+            <option value="38400">38400</option>
+            <option value="57600">57600</option>
+            <option value="115200">115200</option>
+            <option value="230400">230400</option>
+            <option value="460800" selected>460800</option>
+            <option value="921600">921600</option>
+          </select>
+        </div>
+        <pre id="serial-log" class="flash-log serial-log-area"></pre>
+        <div class="serial-input-row">
+          <input id="serial-input" type="text" placeholder="Send command…" autocomplete="off" />
+          <button id="serial-send" class="btn-flash btn-small">Send</button>
+        </div>
+        <div class="serial-actions">
+          <button id="serial-clear" class="btn-logs btn-small">Clear</button>
+          <button id="serial-close" class="btn-logs btn-small">Disconnect</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Flash overlay -->
+    <div id="flash-overlay" class="flash-overlay" hidden>
+      <div class="flash-dialog">
+        <h3>⚡ Flashing Coordinator</h3>
+        <div class="flash-progress-track">
+          <div id="flash-bar" class="flash-progress-fill"></div>
+        </div>
+        <p id="flash-pct" class="flash-pct"></p>
+        <p id="flash-status" class="flash-status">Initializing…</p>
+        <pre id="flash-log" class="flash-log"></pre>
+        <div id="flash-confirm-row" class="flash-confirm-row" hidden>
+          <button id="flash-confirm-yes" class="btn-flash">⚡ Flash Now</button>
+          <button id="flash-confirm-no" class="btn-logs btn-small">Cancel</button>
+        </div>
+        <button id="flash-close" class="btn-flash" hidden>Close</button>
+      </div>
+    </div>
+
+    <script type="module" src="js/flasher.js"></script>
+  </body>
+</html>
