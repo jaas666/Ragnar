@@ -2,7 +2,7 @@ name: Build & Deploy Ragnar Coordinator Flashers (C5 / S3-LCD)
 
 on:
   push:
-    branches: [main]
+    branches: [Ragnar-piglet-coordinator]
     paths:
       - 'espnow_bridge_firmware/espnow_bridge_c5/**'
       - 'espnow_bridge_firmware/espnow_bridge_s3_lcd/**'
