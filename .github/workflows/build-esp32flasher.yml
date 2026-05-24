@@ -2,12 +2,12 @@ name: Build & Deploy Ragnar Coordinator Flashers (C5 / S3-LCD)
 
 on:
   push:
-    branches: [2623]
+    branches: [main]
     paths:
       - 'espnow_bridge_firmware/espnow_bridge_c5/**'
       - 'espnow_bridge_firmware/espnow_bridge_s3_lcd/**'
       - 'espnow_bridge_firmware/flasher/**'
-      - '.github/workflows/build-esp32c6-lcd-flasher.yml'
+      - '.github/workflows/build-esp32flasher.yml'
   workflow_dispatch:
 
 permissions:
